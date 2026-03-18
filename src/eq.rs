@@ -167,19 +167,28 @@ pub fn render_eq_curve(preset: &EqPreset) -> String {
         return String::new();
     }
 
-    // Fixed display bands at standard EQ frequencies
-    let display_freqs: &[f32] = &[32.0, 64.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
+    // Display 20 log-spaced points across 20Hz-20kHz, interpolating gain from all bands
+    let n_points = 20;
     let chars_pos: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let chars_neg: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
     let mut result = format!("  {C_DIM}EQ:{C_RESET} ");
 
-    for &freq in display_freqs {
-        // Find the closest band gain for this frequency
-        let gain = preset.bands.iter()
-            .find(|b| (b.freq - freq).abs() / freq < 0.5)
-            .map(|b| b.gain)
-            .unwrap_or(0.0);
+    for i in 0..n_points {
+        // Log-spaced frequency from 20Hz to 20kHz
+        let t = i as f32 / (n_points - 1) as f32;
+        let freq = 20.0 * (1000.0f32).powf(t); // 20 * 10^(t*3) = 20..20000
+
+        // Sum contributions from all bands using bell curve (peaking EQ response)
+        let mut gain = 0.0f32;
+        for band in &preset.bands {
+            let q = band.q;
+            // Distance in octaves between display freq and band center
+            let octaves = (freq / band.freq).log2();
+            // Bell curve shaped by Q (higher Q = narrower)
+            let weight = (-octaves * octaves * q * q * 2.0).exp();
+            gain += band.gain * weight;
+        }
 
         let (ch, color) = if gain > 0.1 {
             let idx = ((gain / 8.0) * 8.0).clamp(1.0, 8.0) as usize;

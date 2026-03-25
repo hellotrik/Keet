@@ -204,6 +204,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if skip_next { skip_next = false; continue; }
             if value_flags.contains(&arg.as_str()) { skip_next = true; continue; }
             if flags.contains(&arg.as_str()) { continue; }
+            if arg.starts_with("--") || (arg.starts_with('-') && arg.len() == 2) {
+                eprintln!("Unknown option: {}", arg);
+                eprintln!("Run with --help for usage information");
+                std::process::exit(1);
+            }
             positional.push(PathBuf::from(arg));
         }
         if positional.is_empty() {
@@ -511,7 +516,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = build_stream(&device, &stream_config, cons, viz_prod, Arc::clone(&state))?;
     stream.play()?;
 
-    // Set exclusive mode if requested
+    // Set exclusive mode if requested (macOS only: hog mode + per-track rate switching)
     let mut hog_device_id: Option<u32> = None;
     if exclusive {
         match audio::set_exclusive_mode(&device) {
@@ -520,8 +525,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Exclusive mode: hog + per-track rate switching");
             }
             Err(e) => {
-                eprintln!("Note: Hog mode unavailable ({}). Per-track rate switching is still active.", e);
-                // Don't disable exclusive — rate switching is the main feature
+                if cfg!(target_os = "macos") {
+                    // macOS: hog mode failed but rate switching still works via CoreAudio
+                    eprintln!("Note: Hog mode unavailable ({}). Per-track rate switching is still active.", e);
+                } else {
+                    // Other platforms: exclusive mode is not supported at all
+                    eprintln!("Note: {}", e);
+                    state.exclusive.store(false, Ordering::Relaxed);
+                }
             }
         }
     }

@@ -478,6 +478,7 @@ pub struct UiState {
     pub removed_paths: std::collections::HashSet<PathBuf>,
     pub banner_lines: usize,
     pub playlist_dirty: bool,
+    pub current_track_removed: bool,
 }
 
 impl UiState {
@@ -496,6 +497,7 @@ impl UiState {
             removed_paths: std::collections::HashSet::new(),
             banner_lines: 0,
             playlist_dirty: false,
+            current_track_removed: false,
         }
     }
 

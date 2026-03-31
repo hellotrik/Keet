@@ -556,16 +556,16 @@ fn remove_track(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBu
 
     // Adjust current track index
     if track_idx == ui.current {
-        // Removing current track: skip it and restart with fresh playlist
+        // Removing current track: ui.current now points to the right next track
         ui.current = ui.current.min(playlist.len().saturating_sub(1));
         state.next(); // Signal producer to skip current track
+        ui.current_track_removed = true; // dirty handler should jump to ui.current, not ui.current+1
     } else if track_idx < ui.current {
         ui.current -= 1;
     }
 
     state.total_tracks.store(playlist.len(), Ordering::Relaxed);
     state.current_track.store(ui.current, Ordering::Relaxed);
-    // Producer snapshot is stale — next transition will restart with fresh playlist
     ui.playlist_dirty = true;
 
     // Rebuild filter if searching, otherwise just adjust cursor

@@ -22,19 +22,19 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin: keet
-            out: keet-linux-x86_64
+            out: keet-${{ github.ref_name }}-linux-x86_64
           - os: macos-latest
             target: x86_64-apple-darwin
             bin: keet
-            out: keet-macos-x86_64
+            out: keet-${{ github.ref_name }}-macos-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
             bin: keet
-            out: keet-macos-aarch64
+            out: keet-${{ github.ref_name }}-macos-aarch64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             bin: keet.exe
-            out: keet-windows-x86_64.exe
+            out: keet-${{ github.ref_name }}-windows-x86_64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -43,6 +43,20 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      # Sync Cargo.toml version with the git tag (strip leading 'v')
+      - name: Set version from tag (Linux/macOS)
+        if: matrix.os != 'windows-latest'
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+
+      - name: Set version from tag (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          (Get-Content Cargo.toml) -replace '^version = ".*"', "version = `"$version`"" | Set-Content Cargo.toml
 
       # Linux system dependencies
       - name: Install Linux deps

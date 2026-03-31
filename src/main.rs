@@ -379,11 +379,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bal_info = if bal_val != 0 {
         if bal_val < 0 { format!(" | bal: L{}%", -bal_val) } else { format!(" | bal: R{}%", bal_val) }
     } else { String::new() };
-    let info = format!("{} tracks{}{}{}{}{}{}{}{}",
-        playlist.len(),
-        if shuffle { " | shuffled" } else { "" },
+    let info = format!("{}{}{}{}{}{}{}{}",
+        if shuffle { "shuffle" } else { "sequential" },
         if repeat { " | repeat" } else { "" },
-        if hq_resampler { " | HQ resampler" } else { "" },
+        if hq_resampler { " | HQ" } else { "" },
         eq_info, fx_info, xfade_info, cf_info, bal_info);
     let info_display_len = info.len();
     let info_pad = inner_w.saturating_sub(info_display_len + 2);
@@ -734,8 +733,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Playlist was modified — producer snapshot is stale, restart with fresh playlist
                 if ui.playlist_dirty {
                     ui.playlist_dirty = false;
-                    // Use jump_to to signal producer exit and restart via the skip/jump handler
-                    state.jump_to(ui.current);
+                    let target = if ui.current_track_removed {
+                        // ui.current already points to the correct next track
+                        ui.current_track_removed = false;
+                        ui.current
+                    } else {
+                        // Non-current removal: advance to next track in updated playlist
+                        (ui.current + 1).min(playlist.len().saturating_sub(1))
+                    };
+                    state.jump_to(target);
                 }
 
                 if new_index < playlist.len() {

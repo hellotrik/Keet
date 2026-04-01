@@ -431,7 +431,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     writeln!(banner, "\n{0}{{Space}}{1} Pause  {0}{{↑/↓}}{1} Track  {0}{{←/→}}{1} Seek  {0}{{+/-}}{1} Vol  {0}{{[/]}}{1} Bal  {0}{{Q}}{1} Quit",
         "\x1B[2m", "\x1B[0m").ok();
-    writeln!(banner, "{0}{{E}}{1} EQ  {0}{{X}}{1} FX  {0}{{C}}{1} Crossfeed  {0}{{F}}{1} Fader  {0}{{V/B}}{1} Viz  {0}{{L}}{1} List\n",
+    writeln!(banner, "{0}{{E}}{1} EQ  {0}{{X}}{1} FX  {0}{{C}}{1} Crossfeed  {0}{{F}}{1} Fader  {0}{{V/B}}{1} Viz  {0}{{I}}{1} Info  {0}{{L}}{1} List\n",
         "\x1B[2m", "\x1B[0m").ok();
 
     // Print banner and count its lines
@@ -930,7 +930,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                stats.update();
+                if state.show_stats() { stats.update(); }
 
                 if ui.terminal_resized {
                     ui.terminal_resized = false;

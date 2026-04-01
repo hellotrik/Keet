@@ -162,6 +162,9 @@ pub struct PlayerState {
     // Pre/post-fader metering (false = post-fader, true = pre-fader)
     pub(crate) pre_fader: AtomicBool,
 
+    // Show CPU/memory stats in status line
+    pub(crate) show_stats: AtomicBool,
+
     // Crossfade duration in seconds (0 = disabled)
     pub(crate) crossfade_secs: AtomicU32,
 
@@ -236,6 +239,7 @@ impl PlayerState {
             effects_preset_count: AtomicUsize::new(0),
             effects_changed: AtomicBool::new(false),
             pre_fader: AtomicBool::new(false),
+            show_stats: AtomicBool::new(true),
             crossfade_secs: AtomicU32::new(0),
             viz_style: AtomicU8::new(VizStyle::Dots as u8),
             decode_error: Mutex::new(None),
@@ -344,6 +348,14 @@ impl PlayerState {
 
     pub fn is_pre_fader(&self) -> bool {
         self.pre_fader.load(Ordering::Relaxed)
+    }
+
+    pub fn toggle_stats(&self) {
+        self.show_stats.fetch_xor(true, Ordering::Relaxed);
+    }
+
+    pub fn show_stats(&self) -> bool {
+        self.show_stats.load(Ordering::Relaxed)
     }
 
     pub fn viz_style(&self) -> VizStyle {

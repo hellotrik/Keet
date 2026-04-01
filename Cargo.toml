@@ -20,9 +20,6 @@ crossterm = "0.29"
 # rtrb - Lock-free ring buffer for audio
 rtrb = "0.3"
 
-# sysinfo - CPU and memory monitoring
-sysinfo = "0.32"
-
 # realfft - FFT for real signals (audio spectrum analysis)
 realfft = "3.4"
 

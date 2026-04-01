@@ -163,8 +163,12 @@ pub fn print_status(state: &PlayerState, ui: &mut UiState, name: &str, track_inf
         VizStyle::Dots => "Bars",
         VizStyle::Bars => "Dots",
     };
-    let line2 = format!("  {icon_color}{icon}{C_RESET} {C_BOLD}[{cur}/{tot}]{C_RESET} {C_GREEN}{bar_filled}{C_RESET} {C_DIM}vol:{vol}%{eq_display}{fx_display}{cf_display}{clip_display}{bal_display} {fader} buf:{buf_pct}% cpu:{:.1}% mem:{:.0}M {{V}}:{next_viz} {{B}}:{next_style}{C_RESET}",
-           stats.cpu_usage, stats.memory_mb);
+    let stats_display = if state.show_stats() {
+        format!(" cpu:{:.1}% mem:{:.0}M", stats.cpu_usage, stats.memory_mb)
+    } else {
+        String::new()
+    };
+    let line2 = format!("  {icon_color}{icon}{C_RESET} {C_BOLD}[{cur}/{tot}]{C_RESET} {C_GREEN}{bar_filled}{C_RESET} {C_DIM}vol:{vol}%{eq_display}{fx_display}{cf_display}{clip_display}{bal_display} {fader} buf:{buf_pct}%{stats_display} {{V}}:{next_viz} {{B}}:{next_style}{C_RESET}");
     print!("\r\x1B[K{}", truncate_ansi(&line2, term_w));
 
     // EQ curve visualization (when non-Flat preset is active)
@@ -400,6 +404,7 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
                     state.quit(); return true;
                 }
                 KeyEvent { code: KeyCode::Char('c'), .. } => state.cycle_crossfeed(),
+                KeyEvent { code: KeyCode::Char('i'), .. } => state.toggle_stats(),
                 KeyEvent { code: KeyCode::Char('['), .. } => state.balance_left(),
                 KeyEvent { code: KeyCode::Char(']'), .. } => state.balance_right(),
                 _ => {}

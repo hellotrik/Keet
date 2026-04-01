@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sysinfo::{System, Pid, ProcessesToUpdate};
 use realfft::{RealFftPlanner, RealToComplex};
 
 use crate::state::{
@@ -10,11 +9,123 @@ use crate::state::{
     C_RESET, C_DIM, C_CYAN, C_GREEN, C_YELLOW, C_MAGENTA, C_RED,
 };
 
+// --- Lightweight process stats (replaces sysinfo dependency) ---
+
+/// Returns (cumulative_cpu_time_microseconds, resident_memory_bytes).
+#[cfg(target_os = "macos")]
+fn process_stats() -> (u64, u64) {
+    #[repr(C)]
+    struct TimeValue { seconds: i32, microseconds: i32 }
+    #[repr(C)]
+    struct TaskThreadTimesInfo {
+        user_time: TimeValue,
+        system_time: TimeValue,
+    }
+    #[repr(C)]
+    struct MachTaskBasicInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        resident_size_max: u64,
+        user_time: TimeValue,
+        system_time: TimeValue,
+        policy: i32,
+        suspend_count: i32,
+    }
+    extern "C" {
+        fn mach_task_self() -> u32;
+        fn task_info(target: u32, flavor: u32, info: *mut i32, count: *mut u32) -> i32;
+    }
+    const TASK_THREAD_TIMES_INFO: u32 = 3;
+    const MACH_TASK_BASIC_INFO: u32 = 20;
+    unsafe {
+        let task = mach_task_self();
+
+        // CPU times via TASK_THREAD_TIMES_INFO (flavor 3)
+        let mut times: TaskThreadTimesInfo = std::mem::zeroed();
+        let mut count = (std::mem::size_of::<TaskThreadTimesInfo>() / 4) as u32;
+        let cpu_us = if task_info(task, TASK_THREAD_TIMES_INFO,
+                                  &mut times as *mut _ as *mut i32, &mut count) == 0 {
+            times.user_time.seconds as u64 * 1_000_000 + times.user_time.microseconds as u64
+            + times.system_time.seconds as u64 * 1_000_000 + times.system_time.microseconds as u64
+        } else { 0 };
+
+        // Memory via MACH_TASK_BASIC_INFO (flavor 20)
+        let mut info: MachTaskBasicInfo = std::mem::zeroed();
+        count = (std::mem::size_of::<MachTaskBasicInfo>() / 4) as u32;
+        let mem = if task_info(task, MACH_TASK_BASIC_INFO,
+                               &mut info as *mut _ as *mut i32, &mut count) == 0 {
+            info.resident_size
+        } else { 0 };
+
+        (cpu_us, mem)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_stats() -> (u64, u64) {
+    let cpu_us = std::fs::read_to_string("/proc/self/stat").ok().and_then(|stat| {
+        let fields: Vec<&str> = stat.split_whitespace().collect();
+        if fields.len() > 15 {
+            let utime: u64 = fields[13].parse().ok()?;
+            let stime: u64 = fields[14].parse().ok()?;
+            // Clock ticks to microseconds (100 Hz on virtually all Linux systems)
+            Some((utime + stime) * 10_000)
+        } else { None }
+    }).unwrap_or(0);
+
+    let mem = std::fs::read_to_string("/proc/self/status").ok().and_then(|status| {
+        status.lines()
+            .find(|l| l.starts_with("VmRSS:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+    }).unwrap_or(0);
+
+    (cpu_us, mem)
+}
+
+#[cfg(target_os = "windows")]
+fn process_stats() -> (u64, u64) {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct FILETIME { low: u32, high: u32 }
+    #[repr(C)]
+    struct PROCESS_MEMORY_COUNTERS {
+        cb: u32, page_fault_count: u32,
+        peak_working_set_size: usize, working_set_size: usize,
+        quota_peak_paged_pool_usage: usize, quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize, quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize, peak_pagefile_usage: usize,
+    }
+    extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn GetProcessTimes(h: *mut c_void, c: *mut FILETIME, e: *mut FILETIME, k: *mut FILETIME, u: *mut FILETIME) -> i32;
+        fn K32GetProcessMemoryInfo(h: *mut c_void, info: *mut PROCESS_MEMORY_COUNTERS, cb: u32) -> i32;
+    }
+    unsafe {
+        let h = GetCurrentProcess();
+        let (mut c, mut e, mut k, mut u) = (std::mem::zeroed::<FILETIME>(), std::mem::zeroed::<FILETIME>(),
+                                             std::mem::zeroed::<FILETIME>(), std::mem::zeroed::<FILETIME>());
+        let cpu_us = if GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u) != 0 {
+            let k100 = (k.high as u64) << 32 | k.low as u64;
+            let u100 = (u.high as u64) << 32 | u.low as u64;
+            (k100 + u100) / 10 // 100ns → µs
+        } else { 0 };
+
+        let mut mi: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        mi.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let mem = if K32GetProcessMemoryInfo(h, &mut mi, mi.cb) != 0 {
+            mi.working_set_size as u64
+        } else { 0 };
+        (cpu_us, mem)
+    }
+}
+
 pub struct StatsMonitor {
-    system: System,
-    pid: Pid,
     num_cpus: f32,
     last_update: Instant,
+    prev_cpu_us: u64,
+    prev_wall: Instant,
     pub(crate) cpu_usage: f32,
     pub(crate) memory_mb: f64,
     pub(crate) smoothed_buf_pct: f32,
@@ -22,16 +133,15 @@ pub struct StatsMonitor {
 
 impl StatsMonitor {
     pub fn new() -> Self {
-        let system = System::new();
-        let pid = Pid::from(std::process::id() as usize);
+        let (cpu_us, _) = process_stats();
         let num_cpus = std::thread::available_parallelism()
             .map(|n| n.get() as f32)
             .unwrap_or(1.0);
         Self {
-            system,
-            pid,
             num_cpus,
             last_update: Instant::now(),
+            prev_cpu_us: cpu_us,
+            prev_wall: Instant::now(),
             cpu_usage: 0.0,
             memory_mb: 0.0,
             smoothed_buf_pct: 0.0,
@@ -40,12 +150,16 @@ impl StatsMonitor {
 
     pub fn update(&mut self) {
         if self.last_update.elapsed() >= Duration::from_millis(500) {
-            self.system.refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
-            if let Some(process) = self.system.process(self.pid) {
-                // Normalize from per-core % to total system %
-                self.cpu_usage = process.cpu_usage() / self.num_cpus;
-                self.memory_mb = process.memory() as f64 / 1024.0 / 1024.0;
+            let (cpu_us, mem_bytes) = process_stats();
+            let wall_elapsed = self.prev_wall.elapsed().as_micros() as f64;
+            if wall_elapsed > 0.0 {
+                let cpu_delta = cpu_us.saturating_sub(self.prev_cpu_us) as f64;
+                // Total system % (cpu time / wall time / cores)
+                self.cpu_usage = (cpu_delta / wall_elapsed / self.num_cpus as f64 * 100.0) as f32;
             }
+            self.memory_mb = mem_bytes as f64 / 1024.0 / 1024.0;
+            self.prev_cpu_us = cpu_us;
+            self.prev_wall = Instant::now();
             self.last_update = Instant::now();
         }
     }

@@ -31,7 +31,7 @@ serde_json = "1.0"
 souvlaki = "0.8"
 
 # Lightweight HTTP client for lyrics fetching (LRCLIB)
-ureq = "3"
+ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"] }
 
 # macOS CoreAudio bindings for sample rate switching
 [target.'cfg(target_os = "macos")'.dependencies]

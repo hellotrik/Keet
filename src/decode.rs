@@ -436,9 +436,6 @@ pub fn decode_playlist(
 
             pending.extend_from_slice(&raw);
 
-            // Track progress
-            let source_frames = raw.len() / channels;
-
             // Resample if needed
             let output = if let Some(ref mut resampler) = resampler {
                 while pending.len() >= chunk_size * channels {
@@ -460,8 +457,6 @@ pub fn decode_playlist(
                 }
 
                 if interleaved_out.is_empty() {
-                    let played_at_output = source_frames as u64 * output_rate as u64 / sample_rate as u64;
-                    state.samples_played.fetch_add(played_at_output, Ordering::Relaxed);
                     continue;
                 }
 
@@ -469,10 +464,6 @@ pub fn decode_playlist(
             } else {
                 std::mem::take(&mut pending)
             };
-
-            // Track progress (at output rate)
-            let output_frames = output.len() / 2; // stereo
-            state.samples_played.fetch_add(output_frames as u64, Ordering::Relaxed);
 
             // EQ processing
             let eq_output = if eq.is_active() {

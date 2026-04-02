@@ -694,6 +694,10 @@ pub fn build_stream(
 
                 chunk.commit_all();
 
+                // Track playback position (frames consumed from ring buffer)
+                let consumed_frames = samples_to_read / source_channels;
+                state.samples_played.fetch_add(consumed_frames as u64, Ordering::Relaxed);
+
                 // Tap played stereo samples into viz buffer (best-effort, drop if full)
                 // Pre-fader mode: undo volume gain so viz shows raw signal levels
                 let frames_written = if channels > 0 { out_idx / channels } else { 0 };

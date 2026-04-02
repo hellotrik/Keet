@@ -1,11 +1,12 @@
 # Keet
 
-A high-performance, low-CPU terminal audio player with real-time spectrum visualization and parametric EQ.
+A high-performance, low-CPU terminal audio player with real-time spectrum visualization, parametric EQ, and synced lyrics.
 
 ## Features
 
 - **Multi-format support**: MP3, FLAC, WAV, OGG, AAC/M4A, ALAC, AIFF
 - **Low CPU usage**: <0.5% total system CPU (release mode)
+- **Synced lyrics**: Embedded LRC lyrics + automatic fetching from LRCLIB (~3M songs), with adjustable sync offset
 - **Parametric EQ**: Built-in presets (Flat, Bass Boost, Treble Boost, Vocal, Loudness) + custom JSON presets
 - **Audio effects**: Reverb, chorus, delay with built-in environment presets + custom JSON presets
 - **Gapless playback**: Sample-accurate track transitions with continuous audio stream
@@ -20,14 +21,15 @@ A high-performance, low-CPU terminal audio player with real-time spectrum visual
 - **Exclusive mode**: Per-track sample rate matching, macOS hog mode for bit-perfect playback (`--exclusive`)
 - **Headphone crossfeed**: Meier-style frequency-dependent crossfeed with three presets (Light/Medium/Strong)
 - **Balance control**: Stereo balance with `[`/`]` keys (5% steps, -100 to +100)
-- **Clipping indicator**: Red CLIP warning when signal exceeds 0dBFS
+- **Clipping indicator**: Persistent dot that turns red when signal exceeds 0dBFS, with peak safety limiter
 - **Smart audio processing**: Automatic sample rate switching (macOS), Bluetooth detection, conditional resampling, seamless device switching
 - **Volume control**: Adjustable 0-150% with per-sample gain
 - **Playlist features**: Shuffle, repeat, recursive folder scanning, playlist view with search, M3U import/export, folder rescan, multiple source paths with deduplication
 - **Resume playback**: Save and restore last session (track, position, volume, EQ, effects, crossfeed, balance, device, exclusive) automatically
 - **HQ resampler mode**: Optional `--quality` flag for audiophile-grade resampling
-- **Resilient playback**: Silently skips missing/corrupt files, recovers from device disconnection
-- **Terminal-safe UI**: Output adapts to terminal width, no line-wrapping artifacts
+- **Resilient playback**: Silently skips missing/corrupt files, recovers from device disconnection (including USB DAC unplug)
+- **Terminal-safe UI**: Output adapts to terminal width, handles terminal resize gracefully
+- **Process stats**: Lightweight CPU/memory monitoring via direct platform syscalls (toggle with `I`)
 
 ## Quick Start
 
@@ -81,6 +83,7 @@ keet ~/Music/favorites.m3u
 | `Right` | Seek forward 10s |
 | `Left` | Seek backward 10s |
 | `L` | Toggle playlist view |
+| `Y` | Toggle lyrics view |
 | `V` | Cycle visualization modes |
 | `B` | Toggle visualization style (bars/dots) |
 | `E` | Cycle EQ presets |
@@ -89,6 +92,7 @@ keet ~/Music/favorites.m3u
 | `S` | Save playlist as M3U |
 | `F` | Toggle pre/post-fader metering |
 | `C` | Cycle crossfeed presets (Off/Light/Medium/Strong) |
+| `I` | Toggle CPU/memory stats display |
 | `[` | Balance left (5% steps) |
 | `]` | Balance right (5% steps) |
 | `+` / `=` | Volume up (5%) |
@@ -101,7 +105,7 @@ Press `L` to open the playlist view, which replaces the visualization area with 
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` | Scroll track list |
+| `Up` / `Down` | Scroll track list |
 | `Enter` | Jump to selected track |
 | `/` | Search/filter by filename |
 | `D` | Remove selected track |
@@ -109,6 +113,20 @@ Press `L` to open the playlist view, which replaces the visualization area with 
 | `Esc` / `L` | Close playlist view |
 
 While searching (`/`), type to filter tracks by filename (case-insensitive). Press `Enter` to jump to the selected match, or `Esc` to cancel.
+
+### Lyrics View Controls
+
+Press `Y` to open the lyrics view. Synced lyrics auto-scroll to the current line; plain lyrics show as static text.
+
+| Key | Action |
+|-----|--------|
+| `W` / `S` | Scroll up/down (disables auto-scroll for synced lyrics) |
+| `A` / `D` | Adjust sync offset -/+0.5s (synced lyrics only) |
+| `Up` / `Down` | Next/previous track (global) |
+| `Left` / `Right` | Seek +/-10s (global) |
+| `Esc` / `Y` | Close lyrics view |
+
+Lyrics are loaded from embedded tags first (USLT/ID3v2, Vorbis comments, iTunes atoms), then fetched from [LRCLIB](https://lrclib.net) if not found. LRCLIB matches by artist, title, and duration for accurate results. Synced lyrics (LRC format) are preferred over plain text.
 
 ## EQ Presets
 
@@ -143,7 +161,7 @@ Drop JSON files into `~/.config/keet/eq/` (macOS/Linux) or `%APPDATA%\keet\eq\` 
 
 Custom presets appear automatically when cycling with `E`.
 
-Example presets are included in `assets/` — copy them to the presets folders as a starting point:
+Example presets are included in `assets/` -- copy them to the presets folders as a starting point:
 
 ```bash
 # macOS/Linux
@@ -195,9 +213,9 @@ Drop JSON files into `~/.config/keet/effects/` (macOS/Linux) or `%APPDATA%\keet\
 }
 ```
 
-All effect sections are optional — omit any to disable that effect. Custom presets appear when cycling with `X`.
+All effect sections are optional -- omit any to disable that effect. Custom presets appear when cycling with `X`.
 
-Processing order: chorus → delay → reverb.
+Processing order: chorus -> delay -> reverb.
 
 ## Crossfade
 
@@ -219,15 +237,15 @@ Press `V` to cycle through:
 4. **Spectrum Vertical** - 31-band analyzer with peak dots and height-based color gradient (green -> yellow -> red)
 
 Press `B` to toggle between two visualization styles:
-- **Dots** (default) - Braille characters (⣿⣀) for progress/VU, braille spectrum bars
-- **Bars** - Block characters (█░) for VU, thin partials (▏▎▍▌▋▊▉) for progress
+- **Dots** (default) - Braille characters for progress/VU, braille spectrum bars
+- **Bars** - Block characters for VU, thin partials for progress
 
 Press `F` to toggle between post-fader (shows volume-adjusted levels) and pre-fader (shows raw signal levels) metering.
 
 The spectrum analyzer features:
 - 31-band ISO 1/3-octave analysis (20Hz - 20kHz)
 - Per-channel L/R FFT processing (4096-point)
-- Unweighted display (no A-weighting — accurate for spectrum analysis)
+- Unweighted display (no A-weighting -- accurate for spectrum analysis)
 - Fractional bin edge weighting for accurate low-frequency bands
 - Hann window correction and dBFS-calibrated scale
 - Spectral tilt correction (+3dB/octave relative to 1kHz)
@@ -247,24 +265,28 @@ The spectrum analyzer features:
               All shared state via atomics (Release/Acquire for transitions)
 ```
 
-DSP chain: `decode → resample → EQ → effects → RG gain → crossfeed → balance → crossfade → clipping check → ring buffer → volume → output`
+DSP chain: `decode -> resample -> EQ -> effects -> RG gain -> crossfeed -> balance -> crossfade -> peak limiter -> clipping check -> ring buffer -> volume -> output`
+
+Playback position is tracked on the consumer side (audio callback) for accurate time display and lyrics sync.
 
 ### Source Layout
 
 ```
 src/
-├── main.rs      Entry point, CLI args, playlist loop
-├── state.rs     PlayerState, VizMode, constants, ANSI colors
-├── audio.rs     Audio stream, sample rate switching, CoreAudio FFI
-├── decode.rs    Continuous decoder thread, gapless playback, ReplayGain, resampling
-├── eq.rs        Biquad EQ filters, preset loading, JSON parsing
-├── effects.rs   Reverb, chorus, delay effects with preset loading
-├── playlist.rs  Playlist builder, metadata reader, shuffle
-├── crossfeed.rs Meier-style headphone crossfeed filter
-├── resume.rs    Resume state persistence (save/restore sessions)
-├── viz.rs       VizAnalyser, StatsMonitor, spectrum rendering
+├── main.rs        Entry point, CLI args, playlist loop, lyrics loading
+├── state.rs       PlayerState, UiState, ViewMode, constants, ANSI colors
+├── audio.rs       Audio stream, sample rate switching, CoreAudio FFI
+├── decode.rs      Continuous decoder thread, gapless playback, ReplayGain, resampling
+├── eq.rs          Biquad EQ filters, preset loading, JSON parsing
+├── effects.rs     Reverb, chorus, delay effects with preset loading
+├── playlist.rs    Playlist builder, metadata reader, shuffle
+├── crossfeed.rs   Meier-style headphone crossfeed filter
+├── metadata.rs    Tag reading (artist, title, lyrics, ReplayGain), background scan
+├── lyrics.rs      LRC parser, LRCLIB API client, synced/plain lyrics state
+├── resume.rs      Resume state persistence (save/restore sessions)
+├── viz.rs         VizAnalyser, StatsMonitor, spectrum rendering
 ├── media_keys.rs  OS media transport controls (souvlaki)
-└── ui.rs        Terminal UI, keyboard input, progress display
+└── ui.rs          Terminal UI, keyboard input, progress display, lyrics/playlist views
 ```
 
 ### Resampler Modes
@@ -304,9 +326,9 @@ Multiple files, folders, and M3U playlists can be passed as arguments. Duplicate
 | crossterm 0.29 | Terminal UI |
 | rtrb 0.3 | Lock-free ring buffer |
 | realfft 3.4 | FFT for spectrum analysis |
-| sysinfo 0.32 | CPU/memory monitoring |
 | serde 1.0 | JSON deserialization for EQ/effects presets |
 | souvlaki 0.8 | OS media transport controls (media keys, AirPods, Bluetooth) |
+| ureq 3 | HTTP client for LRCLIB lyrics fetching |
 
 ## Platform Notes
 
@@ -323,8 +345,8 @@ Multiple files, folders, and M3U playlists can be passed as arguments. Duplicate
 sudo apt install libasound2-dev libdbus-1-dev
 ```
 
-- `libasound2-dev` — ALSA headers (required by cpal)
-- `libdbus-1-dev` — D-Bus headers (required by souvlaki for MPRIS media keys)
+- `libasound2-dev` -- ALSA headers (required by cpal)
+- `libdbus-1-dev` -- D-Bus headers (required by souvlaki for MPRIS media keys)
 
 ### Compile
 
@@ -333,6 +355,8 @@ cargo build --release
 ```
 
 The binary is at `target/release/keet`. Copy to `/usr/local/bin/` for system-wide access.
+
+Version is embedded automatically from git tags via `build.rs`.
 
 ### macOS .app Bundle
 
@@ -350,13 +374,7 @@ Since Keet is a terminal app, launch it from Terminal after installing:
 
 ### Windows
 
-The `.exe` automatically includes the app icon when built on Windows.
-
-## Future Improvements
-
-- **ReplayGain preamp**: `--rg-preamp` flag for adjustable gain offset
-- **GUI file picker**: Native file/folder dialog so the .app bundle can be launched without Terminal arguments
-- **Drag-and-drop**: Drop audio files or folders onto the .app icon to start playback
+The `.exe` automatically includes the app icon and version metadata (from git tags) when built on Windows.
 
 ## License
 

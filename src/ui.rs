@@ -271,6 +271,73 @@ pub fn print_status(state: &PlayerState, ui: &mut UiState, name: &str, track_inf
         return total_lines;
     }
 
+    // Lyrics view
+    if ui.view_mode == ViewMode::Lyrics {
+        let term_h = terminal::size().map(|(_, h)| h as usize).unwrap_or(24);
+        let header_lines = 2 + if eq_line { 1 } else { 0 };
+        let footer_lines = 2;
+        let visible_rows = term_h.saturating_sub(header_lines + footer_lines + ui.banner_lines).max(1);
+
+        // Separator
+        print!("\n\r\x1B[K  {C_DIM}{}{C_RESET}", "─".repeat(term_w.saturating_sub(2)));
+
+        if let Some(ref lyrics) = ui.lyrics {
+            let total_lines = lyrics.line_count();
+            let adjusted_time = state.time_secs() + ui.lyrics_offset;
+            let current_line = lyrics.current_line(adjusted_time);
+
+            // Auto-scroll for synced lyrics: center current line
+            if lyrics.is_synced() && ui.lyrics_auto_scroll {
+                if let Some(cur) = current_line {
+                    let half = visible_rows / 2;
+                    ui.lyrics_scroll = cur.saturating_sub(half);
+                }
+            }
+
+            // Clamp scroll
+            if total_lines > visible_rows {
+                ui.lyrics_scroll = ui.lyrics_scroll.min(total_lines - visible_rows);
+            } else {
+                ui.lyrics_scroll = 0;
+            }
+
+            for row in 0..visible_rows {
+                let line_idx = ui.lyrics_scroll + row;
+                if line_idx < total_lines {
+                    let text = lyrics.line_text(line_idx);
+                    let is_current = current_line == Some(line_idx);
+                    let line = if is_current {
+                        format!("  {C_BOLD}{C_CYAN}{text}{C_RESET}")
+                    } else {
+                        format!("  {C_DIM}{text}{C_RESET}")
+                    };
+                    print!("\n\r\x1B[K{}", truncate_ansi(&line, term_w));
+                } else {
+                    print!("\n\r\x1B[K");
+                }
+            }
+        } else {
+            print!("\n\r\x1B[K  {C_DIM}(no lyrics available){C_RESET}");
+            for _ in 1..visible_rows {
+                print!("\n\r\x1B[K");
+            }
+        }
+
+        // Footer
+        let is_synced = ui.lyrics.as_ref().map(|l| l.is_synced()).unwrap_or(false);
+        let offset_display = if is_synced && ui.lyrics_offset != 0.0 {
+            format!("  offset:{:+.1}s", ui.lyrics_offset)
+        } else { String::new() };
+        let sync_hint = if is_synced { "  [A/D] sync" } else { "" };
+        let footer = format!("  {C_DIM}[Y] close  [W/S] scroll{sync_hint}{offset_display}{C_RESET}");
+        print!("\n\r\x1B[K{}", truncate_ansi(&footer, term_w));
+
+        let total_lines = 1 + visible_rows + 1;
+        print!("\x1B[J");
+        io::stdout().flush().ok();
+        return total_lines;
+    }
+
     // Original Player mode rendering below
     if viz_mode != VizMode::None {
         print!("\n\r\x1B[K  {C_DIM}{}{C_RESET}", "─".repeat(term_w.saturating_sub(2)));
@@ -334,6 +401,41 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
                 InputMode::Normal => {}
             }
 
+            // Lyrics view keys (when in Normal input mode)
+            if ui.view_mode == ViewMode::Lyrics {
+                match k {
+                    KeyEvent { code: KeyCode::Char('w'), .. } => {
+                        ui.lyrics_auto_scroll = false;
+                        ui.lyrics_scroll = ui.lyrics_scroll.saturating_sub(1);
+                        continue;
+                    }
+                    KeyEvent { code: KeyCode::Char('s'), .. } => {
+                        ui.lyrics_auto_scroll = false;
+                        if let Some(ref lyrics) = ui.lyrics {
+                            let max = lyrics.line_count().saturating_sub(1);
+                            if ui.lyrics_scroll < max {
+                                ui.lyrics_scroll += 1;
+                            }
+                        }
+                        continue;
+                    }
+                    KeyEvent { code: KeyCode::Char('d'), .. } => {
+                        ui.lyrics_offset += 0.5;
+                        continue;
+                    }
+                    KeyEvent { code: KeyCode::Char('a'), .. } => {
+                        ui.lyrics_offset -= 0.5;
+                        continue;
+                    }
+                    KeyEvent { code: KeyCode::Esc, .. } |
+                    KeyEvent { code: KeyCode::Char('y'), .. } => {
+                        ui.view_mode = ViewMode::Player;
+                        continue;
+                    }
+                    _ => {} // Fall through to global keys
+                }
+            }
+
             // Playlist view keys (when in Normal input mode)
             if ui.view_mode == ViewMode::Playlist {
                 match k {
@@ -388,12 +490,22 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
                 KeyEvent { code: KeyCode::Char('b'), .. } => state.toggle_viz_style(),
                 KeyEvent { code: KeyCode::Char('l'), .. } => {
                     ui.view_mode = match ui.view_mode {
-                        ViewMode::Player => {
+                        ViewMode::Player | ViewMode::Lyrics => {
                             ui.cursor = ui.current;
                             ensure_cursor_visible(ui, playlist);
                             ViewMode::Playlist
                         }
                         ViewMode::Playlist => ViewMode::Player,
+                    };
+                }
+                KeyEvent { code: KeyCode::Char('y'), .. } => {
+                    ui.view_mode = match ui.view_mode {
+                        ViewMode::Player | ViewMode::Playlist => {
+                            ui.lyrics_scroll = 0;
+                            ui.lyrics_auto_scroll = true;
+                            ViewMode::Lyrics
+                        }
+                        ViewMode::Lyrics => ViewMode::Player,
                     };
                 }
                 KeyEvent { code: KeyCode::Char('s'), .. } => {

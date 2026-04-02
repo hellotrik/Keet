@@ -25,6 +25,7 @@ struct CachedMeta {
     rg_album_gain: Option<f32>,
     #[allow(dead_code)]
     rg_album_peak: Option<f32>,
+    lyrics: Option<String>,
 }
 
 pub struct MetadataCache {
@@ -66,6 +67,20 @@ impl MetadataCache {
                 .to_string_lossy()
                 .to_lowercase()
                 .contains(query)
+        }
+    }
+
+    pub fn lyrics(&self, index: usize) -> Option<String> {
+        let entries = self.entries.lock().unwrap();
+        entries.get(index).and_then(|e| e.as_ref()).and_then(|m| m.lyrics.clone())
+    }
+
+    pub fn artist_title(&self, index: usize) -> (Option<String>, Option<String>) {
+        let entries = self.entries.lock().unwrap();
+        if let Some(Some(meta)) = entries.get(index) {
+            (meta.artist.clone(), meta.title.clone())
+        } else {
+            (None, None)
         }
     }
 
@@ -132,6 +147,7 @@ fn read_metadata_full(path: &Path) -> Option<CachedMeta> {
 
     let mut title: Option<String> = None;
     let mut artist: Option<String> = None;
+    let mut lyrics: Option<String> = None;
     let mut rg_track_gain: Option<f32> = None;
     let mut rg_track_peak: Option<f32> = None;
     let mut rg_album_gain: Option<f32> = None;
@@ -145,6 +161,9 @@ fn read_metadata_full(path: &Path) -> Option<CachedMeta> {
                 }
                 Some(StandardTagKey::Artist) => {
                     if let Value::String(ref s) = tag.value { artist = Some(s.clone()); }
+                }
+                Some(StandardTagKey::Lyrics) if lyrics.is_none() => {
+                    if let Value::String(ref s) = tag.value { lyrics = Some(s.clone()); }
                 }
                 _ => {}
             }
@@ -163,13 +182,16 @@ fn read_metadata_full(path: &Path) -> Option<CachedMeta> {
                     "replaygain_album_peak" if rg_album_peak.is_none() => {
                         rg_album_peak = parse_rg_peak_value(s);
                     }
+                    "lyrics" | "unsyncedlyrics" if lyrics.is_none() => {
+                        lyrics = Some(s.clone());
+                    }
                     _ => {}
                 }
             }
         }
     }
 
-    if title.is_none() || artist.is_none() {
+    if title.is_none() || artist.is_none() || lyrics.is_none() {
         if let Some(meta) = probed.metadata.get() {
             if let Some(rev) = meta.current() {
                 for tag in rev.tags() {
@@ -179,6 +201,9 @@ fn read_metadata_full(path: &Path) -> Option<CachedMeta> {
                         }
                         Some(StandardTagKey::Artist) if artist.is_none() => {
                             if let Value::String(ref s) = tag.value { artist = Some(s.clone()); }
+                        }
+                        Some(StandardTagKey::Lyrics) if lyrics.is_none() => {
+                            if let Value::String(ref s) = tag.value { lyrics = Some(s.clone()); }
                         }
                         _ => {}
                     }
@@ -196,6 +221,9 @@ fn read_metadata_full(path: &Path) -> Option<CachedMeta> {
                             }
                             "replaygain_album_peak" if rg_album_peak.is_none() => {
                                 rg_album_peak = parse_rg_peak_value(s);
+                            }
+                            "lyrics" | "unsyncedlyrics" if lyrics.is_none() => {
+                                lyrics = Some(s.clone());
                             }
                             _ => {}
                         }
@@ -227,11 +255,17 @@ fn read_metadata_full(path: &Path) -> Option<CachedMeta> {
         rg_track_peak,
         rg_album_gain,
         rg_album_peak,
+        lyrics,
     })
 }
 
 pub fn read_metadata_display(path: &Path) -> Option<String> {
     read_metadata_full(path).map(|m| m.display)
+}
+
+/// Read only embedded lyrics from a file (for tracks not yet in the metadata cache).
+pub fn read_lyrics(path: &Path) -> Option<String> {
+    read_metadata_full(path).and_then(|m| m.lyrics)
 }
 
 pub fn spawn_metadata_scan(

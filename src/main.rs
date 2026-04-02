@@ -19,6 +19,7 @@ mod media_keys;
 mod resume;
 mod crossfeed;
 mod metadata;
+mod lyrics;
 
 use std::env;
 use std::io::{self, Write};
@@ -143,6 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  C            Cycle crossfeed (Off → Light → Medium → Strong)");
         println!("  [ / ]        Balance left / right (5% steps)");
         println!("  L            Toggle playlist view");
+        println!("  Y            Toggle lyrics view (synced LRC auto-scrolls)");
         println!("  S            Save playlist as M3U");
         println!("  R            Rescan folders for new files");
         println!("  Q / Esc      Quit");
@@ -431,7 +433,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     writeln!(banner, "\n{0}{{Space}}{1} Pause  {0}{{↑/↓}}{1} Track  {0}{{←/→}}{1} Seek  {0}{{+/-}}{1} Vol  {0}{{[/]}}{1} Bal  {0}{{Q}}{1} Quit",
         "\x1B[2m", "\x1B[0m").ok();
-    writeln!(banner, "{0}{{E}}{1} EQ  {0}{{X}}{1} FX  {0}{{C}}{1} Crossfeed  {0}{{F}}{1} Fader  {0}{{V/B}}{1} Viz  {0}{{I}}{1} Info  {0}{{L}}{1} List\n",
+    writeln!(banner, "{0}{{E}}{1} EQ  {0}{{X}}{1} FX  {0}{{C}}{1} Crossfeed  {0}{{F}}{1} Fader  {0}{{V/B}}{1} Viz  {0}{{I}}{1} Info  {0}{{L}}{1} List  {0}{{Y}}{1} Lyrics\n",
         "\x1B[2m", "\x1B[0m").ok();
 
     // Print banner and count its lines
@@ -697,6 +699,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut track_info = format!("{} • {}bit {} • {}", format_time(state.total_secs()), bits, ch_str, rate_str);
 
+        // Load lyrics: embedded tags → LRCLIB service (after track info is ready for duration)
+        let track_path = &playlist[ui.current];
+        let dur = { let t = state.total_secs(); if t > 0.0 { Some(t as u32) } else { None } };
+        let raw_lyrics = ui.metadata_cache.lyrics(ui.current)
+            .or_else(|| metadata::read_lyrics(track_path))
+            .or_else(|| {
+                let (artist, title) = ui.metadata_cache.artist_title(ui.current);
+                if let (Some(a), Some(t)) = (artist, title) {
+                    lyrics::fetch_lrclib(&a, &t, dur)
+                } else { None }
+            });
+        ui.lyrics = raw_lyrics.map(|s| lyrics::parse_lyrics(&s));
+        ui.lyrics_scroll = 0;
+        ui.lyrics_auto_scroll = true;
+
         // Update OS media transport
         if let Some(ref mut mc) = media_controls {
             media_keys::update_metadata(mc, &filename, state.total_secs());
@@ -760,6 +777,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     track_ext = new_path.extension()
                         .map(|e| e.to_string_lossy().to_lowercase())
                         .unwrap_or_default();
+
+                    // Load lyrics: embedded tags → LRCLIB service
+                    let dur = { let t = state.total_secs(); if t > 0.0 { Some(t as u32) } else { None } };
+                    let raw_lyrics = ui.metadata_cache.lyrics(ui.current)
+                        .or_else(|| metadata::read_lyrics(new_path))
+                        .or_else(|| {
+                            let (artist, title) = ui.metadata_cache.artist_title(ui.current);
+                            if let (Some(a), Some(t)) = (artist, title) {
+                                lyrics::fetch_lrclib(&a, &t, dur)
+                            } else { None }
+                        });
+                    ui.lyrics = raw_lyrics.map(|s| lyrics::parse_lyrics(&s));
+                    ui.lyrics_scroll = 0;
+                    ui.lyrics_auto_scroll = true;
 
                     let src_rate = state.sample_rate.load(Ordering::Relaxed) as u32;
                     let channels = state.channels.load(Ordering::Relaxed);

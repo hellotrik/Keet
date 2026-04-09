@@ -142,7 +142,7 @@ pub fn decode_playlist(
     crossfeed_presets: &[crate::crossfeed::CrossfeedPreset],
 ) {
     let crossfade_samples = crossfade_secs as usize * output_rate as usize * 2; // stereo
-    let mut crossfade_tail: Option<Vec<f32>> = None;
+    let mut crossfade_tail: Option<std::collections::VecDeque<f32>> = None;
     let mut track_index = start_index;
 
     while track_index < playlist.len() {
@@ -286,7 +286,7 @@ pub fn decode_playlist(
         let xfade_in = crossfade_tail.take();
         let mut crossfade_pos: usize = 0;
         let capture_tail = crossfade_samples > 0;
-        let mut tail_buf: Vec<f32> = if capture_tail { Vec::with_capacity(crossfade_samples) } else { Vec::new() };
+        let mut tail_buf: std::collections::VecDeque<f32> = if capture_tail { std::collections::VecDeque::with_capacity(crossfade_samples) } else { std::collections::VecDeque::new() };
 
         // --- Create resampler if needed ---
         let mut resampler: Option<Async<f32>> = if sample_rate != output_rate {
@@ -325,6 +325,7 @@ pub fn decode_playlist(
         // Reusable buffers
         let mut deinterleaved: Vec<Vec<f32>> = vec![Vec::with_capacity(chunk_size); channels];
         let mut interleaved_out: Vec<f32> = Vec::with_capacity(chunk_size * channels * 2);
+        let mut decoded_buf: Vec<f32> = Vec::with_capacity(chunk_size * channels * 2);
         let mut chunk_buf: Vec<f32> = Vec::with_capacity(chunk_size * channels);
         let mut eq_buf: Vec<f32> = Vec::with_capacity(chunk_size * channels * 2);
         let mut fx_buf: Vec<f32> = Vec::with_capacity(chunk_size * channels * 2);
@@ -334,11 +335,6 @@ pub fn decode_playlist(
 
         // --- Packet decode loop ---
         loop {
-            if state.should_quit() {
-                broke_for_skip = true;
-                break;
-            }
-            // Check quit (also in inner loop so producer isn't stuck when device disconnects)
             if state.should_quit() {
                 broke_for_skip = true;
                 break;
@@ -437,7 +433,8 @@ pub fn decode_playlist(
             pending.extend_from_slice(&raw);
 
             // Resample if needed
-            let output = if let Some(ref mut resampler) = resampler {
+            decoded_buf.clear();
+            if let Some(ref mut resampler) = resampler {
                 while pending.len() >= chunk_size * channels {
                     chunk_buf.clear();
                     chunk_buf.extend_from_slice(&pending[..chunk_size * channels]);
@@ -460,15 +457,18 @@ pub fn decode_playlist(
                     continue;
                 }
 
-                std::mem::take(&mut interleaved_out)
+                decoded_buf.extend_from_slice(&interleaved_out);
+                interleaved_out.clear();
             } else {
-                std::mem::take(&mut pending)
+                decoded_buf.extend_from_slice(&pending);
+                pending.clear();
             };
+            let output = &decoded_buf[..];
 
             // EQ processing
             let eq_output = if eq.is_active() {
                 eq_buf.clear();
-                eq_buf.extend_from_slice(&output);
+                eq_buf.extend_from_slice(output);
                 eq.process_stereo(&mut eq_buf);
                 &eq_buf[..]
             } else {
@@ -580,7 +580,7 @@ pub fn decode_playlist(
 
                 // Capture tail for crossfade into next track
                 if capture_tail {
-                    tail_buf.extend_from_slice(&final_output);
+                    tail_buf.extend(final_output.iter().copied());
                     if tail_buf.len() > crossfade_samples {
                         let excess = tail_buf.len() - crossfade_samples;
                         tail_buf.drain(..excess);

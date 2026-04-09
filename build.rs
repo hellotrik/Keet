@@ -9,7 +9,7 @@ fn main() {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("v{}", env!("CARGO_PKG_VERSION")));
-    println!("cargo:rustc-env=GIT_VERSION={}", version);
+    println!("cargo:rustc-env=GIT_VERSION={version}");
     // Re-run if HEAD or any tag changes.
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/tags");

@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal;
 use rtrb::RingBuffer;
 
@@ -41,6 +42,106 @@ use decode::decode_playlist;
 use playlist::{build_playlist, shuffle_list, read_metadata};
 use ui::{print_status, poll_input, format_time};
 use resume::{ResumeState, save_state, load_state};
+
+#[cfg(target_os = "macos")]
+fn choose_folder_macos() -> Option<String> {
+    use std::process::Command;
+    let script = r#"
+      try
+        set p to choose folder with prompt "选择要播放的目录（或包含音频的文件夹）"
+        POSIX path of p
+      on error number -128
+        ""
+      end try
+    "#;
+    let out = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let t = s.trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
+fn prompt_path_line() -> Option<String> {
+    print!("\n请输入目录/文件路径: ");
+    io::stdout().flush().ok();
+    let mut s = String::new();
+    io::stdin().read_line(&mut s).ok()?;
+    let t = s.trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
+fn exec_self_with_path(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg(path);
+
+    // Replace current process when possible (macOS/Linux).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let _ = cmd.exec();
+        unreachable!();
+    }
+    // Fallback: spawn then exit (Windows).
+    #[cfg(not(unix))]
+    {
+        let _ = cmd.spawn()?;
+        std::process::exit(0);
+    }
+}
+
+fn run_first_launch_picker_and_exec() -> Result<(), Box<dyn std::error::Error>> {
+    // Minimal interactive prompt (not the full player UI yet).
+    // Purpose: ensure "double-click .app" always leads to a path selection flow.
+    print!("\x1Bc");
+    println!("\x1B[1mKeet\x1B[0m");
+    println!();
+    println!("首次启动未检测到上次会话。请选择一个目录开始播放：");
+    println!("  P: 鼠标选择目录（macOS）");
+    println!("  O: 手动输入路径");
+    println!("  Q/Esc: 退出");
+    println!();
+
+    terminal::enable_raw_mode()?;
+    loop {
+        if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+            if let Ok(Event::Key(k)) = event::read() {
+                if k.kind != KeyEventKind::Press { continue; }
+                match k.code {
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        terminal::disable_raw_mode().ok();
+                        return Ok(());
+                    }
+                    KeyCode::Char('o') => {
+                        terminal::disable_raw_mode().ok();
+                        if let Some(p) = prompt_path_line() {
+                            return exec_self_with_path(&p);
+                        }
+                        terminal::enable_raw_mode().ok();
+                    }
+                    KeyCode::Char('p') => {
+                        #[cfg(target_os = "macos")]
+                        {
+                            terminal::disable_raw_mode().ok();
+                            if let Some(p) = choose_folder_macos() {
+                                return exec_self_with_path(&p);
+                            }
+                            terminal::enable_raw_mode().ok();
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            // Ignore on non-macOS.
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
 
 fn build_resume_state(
     ui: &state::UiState,
@@ -171,7 +272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let flags = ["--shuffle", "-s", "--repeat", "-r", "--quality", "-q", "--eq", "-e", "--fx", "--crossfade", "-x", "--rg-mode", "--list-devices", "--device", "--exclusive", "--help", "-h"];
     let (source_paths, shuffle, repeat) = if args.len() < 2 {
-        // Try resume from saved state
+        // Try resume from saved state. If none exists, enter first-launch picker instead of exiting.
         match load_state() {
             Some(rs) => {
                 let paths: Vec<PathBuf> = rs.source_paths.iter()
@@ -190,9 +291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (paths, rs.shuffle, rs.repeat)
             }
             None => {
-                eprintln!("Usage: {} <file-or-folder>... [--shuffle] [--repeat] [--quality] [--eq <name>] [--fx <name>] [--crossfade <secs>] [--rg-mode track|album|off] [--device <name>] [--exclusive] [--list-devices]", args[0]);
-                eprintln!("Controls: Space=Pause ↑↓=Tracks ←→=Seek V=Viz E=EQ X=FX L=List R=Rescan +/-=Vol Q=Quit");
-                std::process::exit(1);
+                return run_first_launch_picker_and_exec();
             }
         }
     } else {

@@ -116,7 +116,9 @@ fn run_first_launch_picker_and_exec() -> Result<(), Box<dyn std::error::Error>> 
     // Purpose: ensure "double-click .app" always leads to a path selection flow.
     #[cfg(target_os = "windows")]
     {
-        let _ = crossterm::ansi_support::enable_ansi_support();
+        // Crossterm 0.29 enables VT processing lazily; calling supports_ansi()
+        // triggers the initializer that attempts to enable it on Windows.
+        let _ = crossterm::ansi_support::supports_ansi();
     }
     print!("\x1Bc");
     println!("\x1B[1mKeet\x1B[0m");
@@ -210,7 +212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // If escape sequences are not interpreted, the entire TUI becomes unreadable.
     #[cfg(target_os = "windows")]
     {
-        let _ = crossterm::ansi_support::enable_ansi_support();
+        let _ = crossterm::ansi_support::supports_ansi();
     }
     // Full terminal reset in case previous run crashed mid-draw
     // \x1Bc = RIS (Reset to Initial State) - clears screen, resets charset, tab stops, modes

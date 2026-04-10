@@ -37,18 +37,69 @@ fn choose_path_with_dialog_macos() -> Option<PathBuf> {
     if t.is_empty() { None } else { Some(PathBuf::from(t)) }
 }
 
-fn read_path_from_user(prompt: &str) -> Option<PathBuf> {
+#[cfg(target_os = "windows")]
+fn choose_path_with_dialog_windows() -> Option<PathBuf> {
+    use std::process::Command;
+
+    // Use Shell.Application BrowseForFolder to show the standard folder picker.
+    // Returns an empty string on cancel.
+    let script = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$shell = New-Object -ComObject Shell.Application
+$folder = $shell.BrowseForFolder(0, '选择要播放的目录（或包含音频的文件夹）', 0, 0)
+if ($null -eq $folder) { '' } else { $folder.Self.Path }
+"#;
+
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let t = s.trim();
+    if t.is_empty() { None } else { Some(PathBuf::from(t)) }
+}
+
+fn choose_path_with_dialog() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        return choose_path_with_dialog_macos();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return choose_path_with_dialog_windows();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        None
+    }
+}
+
+fn read_path_from_user(ui: &mut UiState, prompt: &str) -> Option<PathBuf> {
     // Temporarily exit raw mode so stdin line editing works.
+    //
+    // Important: don't let the prompt permanently shift the TUI down.
+    // We save/restore the cursor position and clear the prompt line(s) afterwards.
+    print!("\x1B[s"); // Save cursor position
+    let _ = io::stdout().flush();
+
     let _ = terminal::disable_raw_mode();
-    print!("\n\r\x1B[0m\x1B[?25h{prompt}");
+    print!("\n\r\x1B[0m\x1B[?25h\x1B[2K{prompt}");
     let _ = io::stdout().flush();
 
     let mut s = String::new();
     let ok = io::stdin().read_line(&mut s).is_ok();
 
+    // Clean prompt area and return to previous cursor position
+    print!("\r\x1B[2K\x1B[u"); // Clear current line, restore cursor
+    let _ = io::stdout().flush();
+
     let _ = terminal::enable_raw_mode();
     print!("\x1B[?25l");
     let _ = io::stdout().flush();
+
+    // macOS Terminal sometimes glitches cursor restore after scroll; force a full redraw
+    // (same path as terminal resize) so layout is stable without manual resizing.
+    ui.terminal_resized = true;
 
     if !ok {
         return None;
@@ -621,24 +672,17 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
                     rescan(state, ui, playlist);
                 }
                 KeyEvent { code: KeyCode::Char('o'), .. } => {
-                    if let Some(p) = read_path_from_user("打开目录/文件: ") {
+                    if let Some(p) = read_path_from_user(ui, "打开目录/文件: ") {
                         switch_source_paths(state, ui, playlist, p);
                     } else {
                         ui.set_status("已取消".to_string());
                     }
                 }
                 KeyEvent { code: KeyCode::Char('p'), .. } => {
-                    #[cfg(target_os = "macos")]
-                    {
-                        if let Some(p) = choose_path_with_dialog_macos() {
-                            switch_source_paths(state, ui, playlist, p);
-                        } else {
-                            ui.set_status("已取消".to_string());
-                        }
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        ui.set_status("鼠标选择：当前仅在 macOS 支持（请用 O 手动输入路径）".to_string());
+                    if let Some(p) = choose_path_with_dialog() {
+                        switch_source_paths(state, ui, playlist, p);
+                    } else {
+                        ui.set_status("已取消".to_string());
                     }
                 }
                 KeyEvent { code: KeyCode::Char('q'), .. } |

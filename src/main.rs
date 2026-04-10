@@ -64,6 +64,24 @@ fn choose_folder_macos() -> Option<String> {
     if t.is_empty() { None } else { Some(t.to_string()) }
 }
 
+#[cfg(target_os = "windows")]
+fn choose_folder_windows() -> Option<String> {
+    use std::process::Command;
+    let script = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$shell = New-Object -ComObject Shell.Application
+$folder = $shell.BrowseForFolder(0, '选择要播放的目录（或包含音频的文件夹）', 0, 0)
+if ($null -eq $folder) { '' } else { $folder.Self.Path }
+"#;
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let t = s.trim();
+    if t.is_empty() { None } else { Some(t.to_string()) }
+}
+
 fn prompt_path_line() -> Option<String> {
     print!("\n请输入目录/文件路径: ");
     io::stdout().flush().ok();
@@ -100,7 +118,7 @@ fn run_first_launch_picker_and_exec() -> Result<(), Box<dyn std::error::Error>> 
     println!("\x1B[1mKeet\x1B[0m");
     println!();
     println!("首次启动未检测到上次会话。请选择一个目录开始播放：");
-    println!("  P: 鼠标选择目录（macOS）");
+    println!("  P: 鼠标选择目录（macOS/Windows）");
     println!("  O: 手动输入路径");
     println!("  Q/Esc: 退出");
     println!();
@@ -131,9 +149,17 @@ fn run_first_launch_picker_and_exec() -> Result<(), Box<dyn std::error::Error>> 
                             }
                             terminal::enable_raw_mode().ok();
                         }
-                        #[cfg(not(target_os = "macos"))]
+                        #[cfg(target_os = "windows")]
                         {
-                            // Ignore on non-macOS.
+                            terminal::disable_raw_mode().ok();
+                            if let Some(p) = choose_folder_windows() {
+                                return exec_self_with_path(&p);
+                            }
+                            terminal::enable_raw_mode().ok();
+                        }
+                        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                        {
+                            // Ignore on other OS.
                         }
                     }
                     _ => {}

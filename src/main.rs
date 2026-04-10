@@ -575,6 +575,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ui = UiState::new(source_paths, std::sync::Arc::clone(&metadata_cache));
     ui.banner_lines = banner_lines;
     ui.banner_text = banner;
+
+    // Windows terminals can start with a mismatched cursor/CRLF state after resume.
+    // Force a full redraw on first UI tick (same code path as manual resize).
+    #[cfg(target_os = "windows")]
+    {
+        ui.terminal_resized = true;
+    }
     ui.scan_handle = Some(metadata::spawn_metadata_scan(
         playlist.clone(),
         std::sync::Arc::clone(&metadata_cache),

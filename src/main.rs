@@ -433,7 +433,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     writeln!(banner, "\n{0}{{Space}}{1} Pause  {0}{{↑/↓}}{1} Track  {0}{{←/→}}{1} Seek  {0}{{+/-}}{1} Vol  {0}{{[/]}}{1} Bal  {0}{{Q}}{1} Quit",
         "\x1B[2m", "\x1B[0m").ok();
-    writeln!(banner, "{0}{{E}}{1} EQ  {0}{{X}}{1} FX  {0}{{C}}{1} Crossfeed  {0}{{F}}{1} Fader  {0}{{V/B}}{1} Viz  {0}{{I}}{1} Info  {0}{{L}}{1} List  {0}{{Y}}{1} Lyrics\n",
+    writeln!(banner, "{0}{{E}}{1} EQ  {0}{{X}}{1} FX  {0}{{C}}{1} Crossfeed  {0}{{F}}{1} Fader  {0}{{V/B}}{1} Viz  {0}{{I}}{1} Info  {0}{{L}}{1} List  {0}{{Y}}{1} Lyrics  {0}{{O}}{1} Open  {0}{{P}}{1} Pick\n",
         "\x1B[2m", "\x1B[0m").ok();
 
     // Print banner and count its lines

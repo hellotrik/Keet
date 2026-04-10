@@ -16,6 +16,106 @@ use crate::viz::{
     render_spectrum_vertical, get_viz_line_count,
 };
 
+#[cfg(target_os = "macos")]
+fn choose_path_with_dialog_macos() -> Option<PathBuf> {
+    use std::process::Command;
+    let script = r#"
+      try
+        set p to choose folder with prompt "选择要播放的目录（或包含音频的文件夹）"
+        POSIX path of p
+      on error number -128
+        ""
+      end try
+    "#;
+    let out = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let t = s.trim();
+    if t.is_empty() { None } else { Some(PathBuf::from(t)) }
+}
+
+fn read_path_from_user(prompt: &str) -> Option<PathBuf> {
+    // Temporarily exit raw mode so stdin line editing works.
+    let _ = terminal::disable_raw_mode();
+    print!("\n\r\x1B[0m\x1B[?25h{prompt}");
+    let _ = io::stdout().flush();
+
+    let mut s = String::new();
+    let ok = io::stdin().read_line(&mut s).is_ok();
+
+    let _ = terminal::enable_raw_mode();
+    print!("\x1B[?25l");
+    let _ = io::stdout().flush();
+
+    if !ok {
+        return None;
+    }
+    let t = s.trim();
+    if t.is_empty() { return None; }
+    Some(PathBuf::from(t))
+}
+
+fn switch_source_paths(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBuf>, new_source: PathBuf) {
+    if !new_source.exists() {
+        ui.set_status(format!("路径不存在: {}", new_source.display()));
+        return;
+    }
+
+    let old_playlist = playlist.clone();
+
+    let mut combined: Vec<PathBuf> = Vec::new();
+    match crate::playlist::build_playlist(&new_source, false) {
+        Ok(tracks) => combined.extend(tracks),
+        Err(e) => {
+            ui.set_status(format!("无法读取: {} ({})", new_source.display(), e));
+            return;
+        }
+    }
+
+    // Deduplicate by canonical path (same logic as main.rs)
+    let mut seen = std::collections::HashSet::new();
+    combined.retain(|p| {
+        let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        seen.insert(key)
+    });
+
+    if combined.is_empty() {
+        ui.set_status("目录内没有可播放音频".to_string());
+        return;
+    }
+
+    *playlist = combined;
+    ui.source_paths = vec![new_source];
+    ui.current = 0;
+    ui.cursor = 0;
+    ui.scroll_offset = 0;
+    ui.filtered_indices.clear();
+    ui.view_mode = ViewMode::Player;
+    ui.playlist_dirty = true;
+
+    state.total_tracks.store(playlist.len(), Ordering::Relaxed);
+    state.current_track.store(ui.current, Ordering::Relaxed);
+
+    // Reindex metadata cache: cancel old scan, remap entries, spawn new scan
+    ui.metadata_cache.cancel.store(true, Ordering::Relaxed);
+    if let Some(h) = ui.scan_handle.take() {
+        h.join().ok();
+    }
+    ui.metadata_cache.reindex(playlist, &old_playlist);
+    ui.metadata_cache.cancel.store(false, Ordering::Relaxed);
+    ui.scan_handle = Some(crate::metadata::spawn_metadata_scan(
+        playlist.clone(),
+        std::sync::Arc::clone(&ui.metadata_cache),
+    ));
+
+    // Force producer restart with fresh playlist snapshot.
+    state.jump_to(0);
+    ui.set_status(format!("已切换目录: {}", ui.source_paths[0].display()));
+}
+
 pub fn format_time(secs: f64) -> String {
     format!("{:02}:{:02}", (secs / 60.0) as u32, (secs % 60.0) as u32)
 }
@@ -519,6 +619,27 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
                 }
                 KeyEvent { code: KeyCode::Char('r'), .. } => {
                     rescan(state, ui, playlist);
+                }
+                KeyEvent { code: KeyCode::Char('o'), .. } => {
+                    if let Some(p) = read_path_from_user("打开目录/文件: ") {
+                        switch_source_paths(state, ui, playlist, p);
+                    } else {
+                        ui.set_status("已取消".to_string());
+                    }
+                }
+                KeyEvent { code: KeyCode::Char('p'), .. } => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        if let Some(p) = choose_path_with_dialog_macos() {
+                            switch_source_paths(state, ui, playlist, p);
+                        } else {
+                            ui.set_status("已取消".to_string());
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        ui.set_status("鼠标选择：当前仅在 macOS 支持（请用 O 手动输入路径）".to_string());
+                    }
                 }
                 KeyEvent { code: KeyCode::Char('q'), .. } |
                 KeyEvent { code: KeyCode::Esc, .. } => { state.quit(); return true; }

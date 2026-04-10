@@ -1,0 +1,129 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "运行(Release) Keet",
+      "type": "shell",
+      "icon": {
+        "id": "rocket",
+        "tooltip": "编译并以 release 模式运行"
+      },
+      "command": "cargo",
+      "args": [
+        "run",
+        "--release",
+        "--",
+        "${input:keetSourcePath}"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "列出音频设备",
+      "type": "shell",
+      "icon": {
+        "id": "terminal",
+        "tooltip": "keet --list-devices"
+      },
+      "command": "cargo",
+      "args": [
+        "run",
+        "--",
+        "--list-devices"
+      ]
+    },
+    {
+      "label": "编译(Release)",
+      "type": "shell",
+      "icon": {
+        "id": "tools",
+        "tooltip": "cargo build --release"
+      },
+      "command": "cargo",
+      "args": [
+        "build",
+        "--release"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "测试",
+      "type": "shell",
+      "icon": {
+        "id": "beaker",
+        "tooltip": "cargo test"
+      },
+      "command": "cargo",
+      "args": [
+        "test"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "格式化",
+      "type": "shell",
+      "icon": {
+        "id": "refresh",
+        "tooltip": "cargo fmt"
+      },
+      "command": "cargo",
+      "args": [
+        "fmt"
+      ]
+    },
+    {
+      "label": "静态检查(Clippy)",
+      "type": "shell",
+      "icon": {
+        "id": "zap",
+        "tooltip": "cargo clippy --all-targets --all-features -D warnings"
+      },
+      "command": "cargo",
+      "args": [
+        "clippy",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "调试运行(Debug)",
+      "type": "shell",
+      "icon": {
+        "id": "debug",
+        "tooltip": "快速编译并运行 debug"
+      },
+      "command": "cargo",
+      "args": [
+        "run",
+        "--",
+        "${input:keetSourcePath}"
+      ],
+      "problemMatcher": [
+        "$rustc"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "keetSourcePath",
+      "type": "promptString",
+      "description": "输入要播放的音频文件/目录（例如：/Users/t/Music/Jazz 或 /path/song.flac）",
+      "default": "/Users/t/Music/"
+    }
+  ]
+}

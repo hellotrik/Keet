@@ -332,6 +332,9 @@ pub fn decode_playlist(
         let mut rg_buf: Vec<f32> = Vec::with_capacity(chunk_size * channels * 2);
         let mut xfeed_buf: Vec<f32> = Vec::with_capacity(chunk_size * channels * 2);
         let mut bal_buf: Vec<f32> = Vec::with_capacity(chunk_size * channels * 2);
+        // Final output buffer is only used when we must mutate samples (crossfade or limiting).
+        // Keeping this reusable avoids per-chunk heap allocations that can cause buffer underruns.
+        let mut final_buf: Vec<f32> = Vec::with_capacity(chunk_size * channels * 2);
 
         // --- Packet decode loop ---
         loop {
@@ -526,43 +529,55 @@ pub fn decode_playlist(
             };
 
             // Crossfade mixing with previous track's tail
-            let mut final_output = if let Some(ref tail) = xfade_in {
-                if crossfade_pos < crossfade_samples && crossfade_samples > 0 {
-                    let mut cf_buf = Vec::with_capacity(bal_output.len());
-                    cf_buf.extend_from_slice(bal_output);
+            let mut using_final_buf = false;
+            let final_output: &[f32];
+            if let Some(ref tail) = xfade_in {
+                if crossfade_samples > 0 && crossfade_pos < crossfade_samples {
+                    final_buf.clear();
+                    final_buf.extend_from_slice(bal_output);
+                    for sample in final_buf.iter_mut() {
+                        if crossfade_pos >= crossfade_samples { break; }
+                        let pos_f = crossfade_pos as f32 / crossfade_samples as f32;
+                        let fade_in = (pos_f * std::f32::consts::FRAC_PI_2).sin();
+                        let fade_out = ((1.0 - pos_f) * std::f32::consts::FRAC_PI_2).sin();
+                        let tail_sample = tail.get(crossfade_pos).copied().unwrap_or(0.0);
+                        *sample = *sample * fade_in + tail_sample * fade_out;
+                        crossfade_pos += 1;
+                    }
+                    using_final_buf = true;
+                }
+            }
+            // Clipping check — flag when any sample would exceed 0dBFS after volume
+            let vol = state.volume.load(Ordering::Relaxed) as f32 / 100.0;
+            let threshold = if vol > 0.0 { 1.0 / vol } else { f32::MAX };
 
-                    for sample in cf_buf.iter_mut() {
-                        if crossfade_pos < crossfade_samples {
-                            let pos_f = crossfade_pos as f32 / crossfade_samples as f32;
-                            let fade_in = (pos_f * std::f32::consts::FRAC_PI_2).sin();
-                            let fade_out = ((1.0 - pos_f) * std::f32::consts::FRAC_PI_2).sin();
-
-                            let tail_sample = if crossfade_pos < tail.len() { tail[crossfade_pos] } else { 0.0 };
-                            *sample = *sample * fade_in + tail_sample * fade_out;
-                            crossfade_pos += 1;
+            if using_final_buf {
+                if !final_buf.is_empty() {
+                    let peak = final_buf.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+                    if peak > threshold {
+                        state.clipping.store(true, Ordering::Relaxed);
+                        let scale = threshold / peak;
+                        for s in final_buf.iter_mut() {
+                            *s *= scale;
                         }
                     }
-                    cf_buf
-                } else {
-                    bal_output.to_vec()
                 }
+                final_output = &final_buf[..];
             } else {
-                bal_output.to_vec()
-            };
-
-            // Clipping check — flag when any sample would exceed 0dBFS after volume
-            if !final_output.is_empty() {
-                let vol = state.volume.load(Ordering::Relaxed) as f32 / 100.0;
-                let threshold = if vol > 0.0 { 1.0 / vol } else { f32::MAX };
-                let peak = final_output.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
-                if peak > threshold {
-                    state.clipping.store(true, Ordering::Relaxed);
-                    // Peak-limit to prevent hard clipping at the DAC
-                    let scale = threshold / peak;
-                    for s in final_output.iter_mut() {
-                        *s *= scale;
+                if !bal_output.is_empty() {
+                    let peak = bal_output.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+                    if peak > threshold {
+                        state.clipping.store(true, Ordering::Relaxed);
+                        let scale = threshold / peak;
+                        final_buf.clear();
+                        final_buf.extend_from_slice(bal_output);
+                        for s in final_buf.iter_mut() {
+                            *s *= scale;
+                        }
+                        using_final_buf = true;
                     }
                 }
+                final_output = if using_final_buf { &final_buf[..] } else { bal_output };
             }
 
             // Push to ring buffer

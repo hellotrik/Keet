@@ -114,6 +114,10 @@ fn exec_self_with_path(path: &str) -> Result<(), Box<dyn std::error::Error>> {
 fn run_first_launch_picker_and_exec() -> Result<(), Box<dyn std::error::Error>> {
     // Minimal interactive prompt (not the full player UI yet).
     // Purpose: ensure "double-click .app" always leads to a path selection flow.
+    #[cfg(target_os = "windows")]
+    {
+        let _ = crossterm::ansi_support::enable_ansi_support();
+    }
     print!("\x1Bc");
     println!("\x1B[1mKeet\x1B[0m");
     println!();
@@ -202,6 +206,12 @@ fn build_resume_state(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Ensure terminal is in normal mode (cleanup from previous crashed runs)
     let _ = terminal::disable_raw_mode();
+    // Windows console (conhost) may not have ANSI/VT processing enabled by default.
+    // If escape sequences are not interpreted, the entire TUI becomes unreadable.
+    #[cfg(target_os = "windows")]
+    {
+        let _ = crossterm::ansi_support::enable_ansi_support();
+    }
     // Full terminal reset in case previous run crashed mid-draw
     // \x1Bc = RIS (Reset to Initial State) - clears screen, resets charset, tab stops, modes
     print!("\x1Bc");

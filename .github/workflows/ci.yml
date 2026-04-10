@@ -24,10 +24,10 @@ jobs:
           #   target: x86_64-apple-darwin
           #   bin: keet
           #   out: keet-macos-x86_64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            bin: keet
-            out: keet-macos-aarch64
+          # - os: macos-latest
+          #   target: aarch64-apple-darwin
+          #   bin: keet
+          #   out: keet-macos-aarch64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             bin: keet.exe

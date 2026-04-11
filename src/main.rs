@@ -556,7 +556,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print banner and count its lines
     print!("{}", banner);
-    let banner_lines = banner_for_tui.lines().count() + 2;
+    let banner_lines = banner_for_tui.lines().count() + 3;
 
     terminal::enable_raw_mode()?;
     let _ = execute!(io::stdout(), EnableMouseCapture);
@@ -568,6 +568,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stdout_for_tui = io::stdout();
     let stdout_lock = stdout_for_tui.lock();
     let mut tui_terminal = Terminal::new(CrosstermBackend::new(stdout_lock))?;
+    // 清屏：否则启动前 print 的快捷键长行会残留在首帧正文右侧（与曲目行同一物理行叠字）。
+    tui_terminal.clear()?;
 
     let metadata_cache = metadata::MetadataCache::new(playlist.len());
     let mut ui = UiState::new(source_paths, std::sync::Arc::clone(&metadata_cache), shuffle, repeat);

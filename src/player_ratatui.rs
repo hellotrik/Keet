@@ -11,7 +11,7 @@ use ratatui::backend::Backend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::eq::{self, EqPreset};
@@ -129,7 +129,7 @@ fn banner_row_push_label(spans: &mut Vec<Span<'static>>, cx: &mut u16, s: &str, 
     spans.push(Span::styled(s.to_string(), dim));
 }
 
-/// 在 banner 底部两行绘制快捷键提示：第一行灰字；第二行为黑底白字可点击热键并写入 `ui.banner_hotkey_regions`。
+/// 在 banner 底部绘制快捷键区：第一行灰字；中间一行 `─` 分隔；末行为黑底白字热键并写入 `ui.banner_hotkey_regions`。
 fn render_banner_shortcut_rows(frame: &mut Frame, area: Rect, ui: &mut UiState) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -140,28 +140,46 @@ fn render_banner_shortcut_rows(frame: &mut Frame, area: Rect, ui: &mut UiState) 
         x: area.x,
         y: area.y,
         width: area.width,
-        height: 1.min(area.height),
+        height: 1,
     };
-    let row1 = Rect {
-        x: area.x,
-        y: area.y.saturating_add(row0.height),
-        width: area.width,
-        height: area.height.saturating_sub(row0.height),
-    };
-
+    frame.render_widget(Clear, row0);
     let help0 = "{Space} Pause  {↑/↓} Track  {←/→} Seek  {+/-} Vol  {[/]} Bal  {Q} Quit";
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(help0, dim))).wrap(Wrap { trim: true }),
         row0,
     );
 
-    if row1.height == 0 {
+    if area.height == 1 {
         return;
     }
 
+    if area.height >= 3 {
+        let sep_row = Rect {
+            x: area.x,
+            y: area.y.saturating_add(1),
+            width: area.width,
+            height: 1,
+        };
+        frame.render_widget(Clear, sep_row);
+        let sep = "─".repeat(area.width as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(sep, dim))).wrap(Wrap { trim: true }),
+            sep_row,
+        );
+    }
+
+    let chip_y = area.y.saturating_add(area.height.saturating_sub(1));
+    let chip_row = Rect {
+        x: area.x,
+        y: chip_y,
+        width: area.width,
+        height: 1,
+    };
+    frame.render_widget(Clear, chip_row);
+
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut cx = row1.x;
-    let y = row1.y;
+    let mut cx = chip_row.x;
+    let y = chip_y;
     let regs = &mut ui.banner_hotkey_regions;
 
     banner_row_push_chip(&mut spans, regs, &mut cx, y, "E", BannerHotkey::Eq);
@@ -192,7 +210,7 @@ fn render_banner_shortcut_rows(frame: &mut Frame, area: Rect, ui: &mut UiState) 
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)).wrap(Wrap { trim: true }),
-        row1,
+        chip_row,
     );
 }
 
@@ -264,7 +282,7 @@ fn draw_player_frame(
     ui.banner_hotkey_regions.clear();
 
     let inner_h = binner.height;
-    let help_h: u16 = 2.min(inner_h);
+    let help_h: u16 = 3.min(inner_h);
     let para_h = inner_h.saturating_sub(help_h).max(1);
 
     let banner_chunks = Layout::default()
@@ -640,17 +658,22 @@ fn render_header_block(
     let inner = area;
     let mut row = 0u16;
     if inner.height > row {
+        let r = row_rect(inner, row);
+        // 先擦满整行，避免启动时 print 的长菜单残留在 Ratatui 未改写的列上（用户看到「曲目行后面跟旧菜单」）。
+        frame.render_widget(Clear, r);
         frame.render_widget(
             Paragraph::new(line1.clone()).wrap(Wrap { trim: true }),
-            row_rect(inner, row),
+            r,
         );
         row += 1;
     }
     if inner.height > row {
         let line2_row = row;
+        let r = row_rect(inner, row);
+        frame.render_widget(Clear, r);
         frame.render_widget(
             Paragraph::new(line2.clone()).wrap(Wrap { trim: true }),
-            row_rect(inner, row),
+            r,
         );
         register_transport_clicks(
             ui,
@@ -664,9 +687,11 @@ fn render_header_block(
         row += 1;
     }
     if eq_line && inner.height > row {
+        let r = row_rect(inner, row);
+        frame.render_widget(Clear, r);
         frame.render_widget(
             Paragraph::new(strip_ansi(eq_curve)).wrap(Wrap { trim: true }),
-            row_rect(inner, row),
+            r,
         );
     }
 }

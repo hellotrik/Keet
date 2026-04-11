@@ -20,6 +20,7 @@ mod resume;
 mod crossfeed;
 mod metadata;
 mod lyrics;
+mod idle_ratatui;
 
 use std::env;
 use std::io::{self, Write};
@@ -41,7 +42,7 @@ use audio::{build_stream, set_output_sample_rate, probe_sample_rate, fix_bluetoo
 use decode::decode_playlist;
 use playlist::{build_playlist, shuffle_list, read_metadata};
 use ui::{print_status, poll_input, format_time};
-use resume::{ResumeState, save_state, load_state};
+use resume::{build_resume_state, save_state, load_state};
 
 #[cfg(target_os = "macos")]
 fn choose_folder_macos() -> Option<String> {
@@ -172,34 +173,6 @@ fn run_first_launch_picker_and_exec() -> Result<(), Box<dyn std::error::Error>> 
                 }
             }
         }
-    }
-}
-
-fn build_resume_state(
-    ui: &state::UiState,
-    playlist: &[std::path::PathBuf],
-    player_state: &state::PlayerState,
-    eq_presets: &[eq::EqPreset],
-    fx_presets: &[effects::EffectsPreset],
-    cf_presets: &[crossfeed::CrossfeedPreset],
-    device_name: &Option<String>,
-) -> ResumeState {
-    ResumeState {
-        source_paths: ui.source_paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
-        track_path: playlist.get(ui.current)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        position_secs: player_state.time_secs(),
-        shuffle: ui.shuffle,
-        repeat: ui.repeat,
-        volume: player_state.volume.load(std::sync::atomic::Ordering::Relaxed),
-        eq_preset: eq_presets[player_state.eq_index()].name.clone(),
-        effects_preset: fx_presets[player_state.effects_index()].name.clone(),
-        rg_mode: Some(player_state.rg_mode().name().to_lowercase()),
-        device: device_name.clone(),
-        exclusive: Some(player_state.exclusive.load(std::sync::atomic::Ordering::Relaxed)),
-        crossfeed_preset: Some(cf_presets[player_state.crossfeed_index()].name.clone()),
-        balance: Some(player_state.balance_value()),
     }
 }
 
@@ -696,48 +669,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // After last track with repeat off: stay in TUI (open new music, toggle G/T, quit).
         if ui.session_idle {
-            let mut prev_idle_viz = usize::MAX;
-            let mut last_idle_ui = Instant::now();
-            let idle_name = "(已播完)";
-            let idle_info = "按 O / P 添加音乐 · G 随机 · T 列表循环 · Q 退出";
-            let idle_ext = "";
-            while ui.session_idle && !state.should_quit() {
-                if poll_input(&state, &mut ui, &mut playlist) {
-                    terminal::disable_raw_mode()?;
-                    print!("\x1B[?25h");
-                    if prev_idle_viz != usize::MAX {
-                        let up = 2 + prev_idle_viz;
-                        print!("\x1B[{}F", up);
-                    }
-                    print!("\x1B[J");
-                    io::stdout().flush().ok();
-                    save_state(&build_resume_state(&ui, &playlist, &state, &eq_presets, &fx_presets, &cf_presets, &device_arg));
-                    if let Some(id) = hog_device_id {
-                        audio::release_exclusive_mode(id);
-                    }
-                    return Ok(());
+            let quit_idle = idle_ratatui::run_session_idle(
+                &state,
+                &mut ui,
+                &mut playlist,
+                eq_presets.as_ref(),
+                fx_presets.as_ref(),
+                cf_presets.as_ref(),
+                &device_arg,
+            )?;
+            if quit_idle {
+                terminal::disable_raw_mode()?;
+                print!("\x1B[?25h");
+                print!("\x1B[J");
+                io::stdout().flush().ok();
+                save_state(&build_resume_state(
+                    &ui,
+                    &playlist,
+                    &state,
+                    eq_presets.as_ref(),
+                    fx_presets.as_ref(),
+                    cf_presets.as_ref(),
+                    &device_arg,
+                ));
+                if let Some(id) = hog_device_id {
+                    audio::release_exclusive_mode(id);
                 }
-                if ui.pending_resume_save {
-                    save_state(&build_resume_state(&ui, &playlist, &state, &eq_presets, &fx_presets, &cf_presets, &device_arg));
-                    ui.pending_resume_save = false;
-                }
-                if last_idle_ui.elapsed() >= Duration::from_millis(50) {
-                    if ui.terminal_resized {
-                        ui.terminal_resized = false;
-                        print!("\x1B[0m\x1B[2J\x1B[H{}", ui.banner_text.replace('\n', "\r\n"));
-                        prev_idle_viz = usize::MAX;
-                    }
-                    let current_eq = &eq_presets[state.eq_index()];
-                    let current_fx = &fx_presets[state.effects_index()].name;
-                    let current_cf = &cf_presets[state.crossfeed_index()].name;
-                    prev_idle_viz = print_status(
-                        &state, &mut ui, idle_name, idle_info, idle_ext,
-                        current_eq, current_fx, current_cf,
-                        &mut stats, prev_idle_viz, &playlist,
-                    );
-                    last_idle_ui = Instant::now();
-                }
-                thread::sleep(Duration::from_millis(50));
+                return Ok(());
             }
             if state.should_quit() { break 'playlist; }
             continue 'playlist;

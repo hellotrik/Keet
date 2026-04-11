@@ -33,6 +33,8 @@ souvlaki = "0.8"
 
 # Lightweight HTTP client for lyrics fetching (LRCLIB)
 ureq = { version = "3", default-features = false, features = ["native-tls", "gzip"] }
+# Ratatui 0.29 绑定 crossterm 0.28；0.30 + crossterm_0_29 与下方 crossterm 0.29 统一依赖树。
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29", "underline-color", "all-widgets", "macros", "layout-cache", "std"] }
 
 # macOS CoreAudio bindings for sample rate switching
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -35,6 +35,7 @@ fn draw_idle_frame(
 ) {
     ui.banner_hotkey_regions.clear();
     ui.transport_click_regions.clear();
+    ui.playlist_mouse_rows.clear();
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)

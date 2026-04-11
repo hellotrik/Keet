@@ -531,6 +531,8 @@ pub struct UiState {
     pub banner_hotkey_regions: Vec<(CellRect, BannerHotkey)>,
     /// 每帧重算：播放图标与进度条左/右半块的命中区。
     pub transport_click_regions: Vec<(CellRect, TransportMouseAction)>,
+    /// 列表视图：可见行对应的列表逻辑下标 `list_pos`（与 `scroll_offset + 行号` 一致，用于鼠标选曲）。
+    pub playlist_mouse_rows: Vec<(CellRect, usize)>,
     pub playlist_dirty: bool,
     pub current_track_removed: bool,
     pub terminal_resized: bool,
@@ -573,6 +575,7 @@ impl UiState {
             banner_text: String::new(),
             banner_hotkey_regions: Vec::new(),
             transport_click_regions: Vec::new(),
+            playlist_mouse_rows: Vec::new(),
             playlist_dirty: false,
             current_track_removed: false,
             terminal_resized: false,

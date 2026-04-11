@@ -244,6 +244,25 @@ fn apply_banner_hotkey(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec
     }
 }
 
+/// 列表逻辑行 `list_pos` 选中并立即播放（与列表内 Enter 一致）。
+fn playlist_activate_list_pos(state: &PlayerState, ui: &mut UiState, playlist: &[PathBuf], list_pos: usize) {
+    let max = if ui.filtered_indices.is_empty() {
+        playlist.len().saturating_sub(1)
+    } else {
+        ui.filtered_indices.len().saturating_sub(1)
+    };
+    if playlist.is_empty() || list_pos > max {
+        return;
+    }
+    ui.cursor = list_pos;
+    let target = if ui.filtered_indices.is_empty() {
+        list_pos
+    } else {
+        ui.filtered_indices.get(list_pos).copied().unwrap_or(list_pos)
+    };
+    state.jump_to(target);
+}
+
 pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBuf>) -> bool {
     // Drain all pending events for responsive input
     while event::poll(Duration::ZERO).unwrap_or(false) {
@@ -255,12 +274,28 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
         }
 
         if let Event::Mouse(me) = ev {
-            if me.kind != MouseEventKind::Down(MouseButton::Left) {
-                continue;
-            }
             if !matches!(ui.input_mode, InputMode::Normal) {
                 continue;
             }
+
+            if ui.view_mode == ViewMode::Playlist {
+                match me.kind {
+                    MouseEventKind::ScrollUp => {
+                        playlist_cursor_up(ui);
+                        continue;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        playlist_cursor_down(ui, playlist);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            if me.kind != MouseEventKind::Down(MouseButton::Left) {
+                continue;
+            }
+
             let col = me.column;
             let row = me.row;
             let in_cell = |r: &CellRect| {
@@ -286,6 +321,15 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
                             TransportMouseAction::SeekBack => state.seek(-10),
                             TransportMouseAction::SeekForward => state.seek(10),
                         }
+                        hit_chrome = true;
+                        break;
+                    }
+                }
+            }
+            if !hit_chrome && ui.view_mode == ViewMode::Playlist {
+                for (r, list_pos) in &ui.playlist_mouse_rows {
+                    if in_cell(r) {
+                        playlist_activate_list_pos(state, ui, playlist, *list_pos);
                         break;
                     }
                 }

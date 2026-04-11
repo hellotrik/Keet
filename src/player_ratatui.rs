@@ -265,6 +265,7 @@ fn draw_player_frame(
     status_flash: Option<&str>,
 ) {
     ui.transport_click_regions.clear();
+    ui.playlist_mouse_rows.clear();
 
     let area = frame.area();
     let term_w = area.width as usize;
@@ -745,7 +746,7 @@ fn render_viz_block(
 fn render_playlist_list(
     frame: &mut Frame,
     area: Rect,
-    ui: &UiState,
+    ui: &mut UiState,
     playlist: &[PathBuf],
     visible_rows: usize,
     term_w: usize,
@@ -782,6 +783,19 @@ fn render_playlist_list(
             inner,
         );
         return;
+    }
+
+    for row in 0..display_items.len() {
+        let y = inner.y.saturating_add(row as u16);
+        ui.playlist_mouse_rows.push((
+            CellRect {
+                x: inner.x,
+                y,
+                w: inner.width,
+                h: 1,
+            },
+            ui.scroll_offset.saturating_add(row),
+        ));
     }
 
     let list_items: Vec<ListItem<'static>> = display_items

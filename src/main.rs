@@ -21,6 +21,7 @@ mod crossfeed;
 mod metadata;
 mod lyrics;
 mod idle_ratatui;
+mod player_ratatui;
 
 use std::env;
 use std::io::{self, Write};
@@ -41,7 +42,9 @@ use viz::{StatsMonitor, VizAnalyser};
 use audio::{build_stream, set_output_sample_rate, probe_sample_rate, fix_bluetooth_sample_rate};
 use decode::decode_playlist;
 use playlist::{build_playlist, shuffle_list, read_metadata};
-use ui::{print_status, poll_input, format_time};
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+use ui::{poll_input, format_time};
 use resume::{build_resume_state, save_state, load_state};
 
 #[cfg(target_os = "macos")]
@@ -558,6 +561,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     print!("\x1B[?25l");
     io::stdout().flush().ok();
 
+    let stdout_for_tui = io::stdout();
+    let stdout_lock = stdout_for_tui.lock();
+    let mut tui_terminal = Terminal::new(CrosstermBackend::new(stdout_lock))?;
+
     let metadata_cache = metadata::MetadataCache::new(playlist.len());
     let mut ui = UiState::new(source_paths, std::sync::Arc::clone(&metadata_cache), shuffle, repeat);
     ui.banner_lines = banner_lines;
@@ -580,8 +587,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.current = idx;
         }
     }
-
-    let mut prev_viz_lines: usize = usize::MAX;
 
     // --- Persistent audio setup (created once, reused across all tracks) ---
     let mut device = if let Some(ref dev_name) = device_arg {
@@ -670,6 +675,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // After last track with repeat off: stay in TUI (open new music, toggle G/T, quit).
         if ui.session_idle {
             let quit_idle = idle_ratatui::run_session_idle(
+                &mut tui_terminal,
                 &state,
                 &mut ui,
                 &mut playlist,
@@ -889,10 +895,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Input
             if poll_input(&state, &mut ui, &mut playlist) {
                 print!("\x1B[?25h");
-                if prev_viz_lines != usize::MAX {
-                    let up = 2 + prev_viz_lines;
-                    print!("\x1B[{}F", up);
-                }
                 print!("\x1B[J");
                 io::stdout().flush().ok();
                 save_state(&build_resume_state(&ui, &playlist, &state, &eq_presets, &fx_presets, &cf_presets, &device_arg));
@@ -1157,17 +1159,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if ui.terminal_resized {
                     ui.terminal_resized = false;
-                    // Clear entire screen and reprint banner (old lines may
-                    // have wrapped at the previous terminal width).
-                    // In raw mode \n doesn't imply \r, so use \r\n.
-                    print!("\x1B[0m\x1B[2J\x1B[H{}", ui.banner_text.replace('\n', "\r\n"));
-                    prev_viz_lines = usize::MAX;
+                    tui_terminal.clear()?;
                 }
 
                 let current_eq = &eq_presets[state.eq_index()];
                 let current_fx = &fx_presets[state.effects_index()].name;
                 let current_cf = &cf_presets[state.crossfeed_index()].name;
-                prev_viz_lines = print_status(&state, &mut ui, &filename, &track_info, &track_ext, current_eq, current_fx, current_cf, &mut stats, prev_viz_lines, &playlist);
+                player_ratatui::draw_player(
+                    &mut tui_terminal,
+                    &state,
+                    &mut ui,
+                    &playlist,
+                    &filename,
+                    &track_info,
+                    &track_ext,
+                    current_eq,
+                    current_fx,
+                    current_cf,
+                    &mut stats,
+                )?;
 
                 if let Some(ref mut mc) = media_controls {
                     media_keys::update_playback(mc, state.is_paused(), state.time_secs());
@@ -1181,14 +1191,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    drop(tui_terminal);
+
     terminal::disable_raw_mode()?;
 
     print!("\x1B[?25h");
 
-    if prev_viz_lines != usize::MAX {
-        let up = 2 + prev_viz_lines;
-        print!("\x1B[{}F", up);
-    }
     print!("\x1B[J"); // Clear from cursor to end of screen
     println!("✓ Done");
 

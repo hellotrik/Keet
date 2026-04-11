@@ -1,16 +1,15 @@
 //! 「列表已播完」空闲态的 Ratatui 绘制层。
 //!
-//! **职责**：在 `session_idle` 时用分区布局（标题 / 说明 / 状态条）呈现界面，替代手写 ANSI 与 `print_status` 的竞态，减少残影与对齐问题。
-//! **设计**：与主播放循环解耦——仅在本模块内持有 [`Terminal`]；退出空闲时 `drop` 终端并置 `ui.terminal_resized`，由既有逻辑清屏并重绘 banner + `print_status`。
+//! **职责**：在 `session_idle` 时用分区布局（标题 / 说明 / 状态条）呈现界面，与主界面共用 Ratatui，减少残影与对齐问题。
+//! **设计**：与主界面共用同一 [`Terminal`]（由 `main` 创建）；退出空闲时置 `ui.terminal_resized` 以便下一帧整屏重绘主界面。
 //! **输入**：复用 [`crate::ui::poll_input`]，保证 O / P / G / T / Q 等与主界面一致。
 //! **注意**：工程将 Ratatui 设为 0.30 + `crossterm_0_29`，与 `Cargo.toml` 中的 `crossterm = "0.29"` 对齐；raw 模式与事件仍由 `main` 统一管理，此处只负责帧绘制。
 
-use std::io::{self, stdout, Write};
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::Backend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -99,8 +98,9 @@ fn draw_idle_frame(
 ///
 /// # 返回
 /// - `Ok(true)`：用户通过 `poll_input` 请求退出整个应用。
-/// - `Ok(false)`：已离开空闲态（继续播放或主循环其它分支），调用方应全屏重绘。
-pub fn run_session_idle(
+/// - `Ok(false)`：已离开空闲态（继续播放或主循环其它分支），调用方应全屏重绘（`terminal_resized` 已置位）。
+pub fn run_session_idle<B: Backend>(
+    terminal: &mut Terminal<B>,
     state: &PlayerState,
     ui: &mut UiState,
     playlist: &mut Vec<PathBuf>,
@@ -108,12 +108,7 @@ pub fn run_session_idle(
     fx_presets: &[EffectsPreset],
     cf_presets: &[CrossfeedPreset],
     device_arg: &Option<String>,
-) -> io::Result<bool> {
-    let mut stdout = stdout();
-    let locked = stdout.lock();
-    let backend = CrosstermBackend::new(locked);
-    let mut terminal = Terminal::new(backend)?;
-
+) -> Result<bool, B::Error> {
     loop {
         if state.should_quit() || !ui.session_idle {
             break;
@@ -124,8 +119,6 @@ pub fn run_session_idle(
         })?;
 
         if poll_input(state, ui, playlist) {
-            drop(terminal);
-            let _ = stdout.flush();
             return Ok(true);
         }
 
@@ -149,8 +142,6 @@ pub fn run_session_idle(
         thread::sleep(Duration::from_millis(50));
     }
 
-    drop(terminal);
-    let _ = stdout.flush();
     ui.terminal_resized = true;
     Ok(false)
 }

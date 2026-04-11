@@ -20,7 +20,6 @@ pub const HOLD_TIME: u8 = 10;      // Frames for the dot to "hang"
 
 // ANSI color codes
 pub const C_RESET: &str = "\x1B[0m";
-pub const C_BOLD: &str = "\x1B[1m";
 pub const C_DIM: &str = "\x1B[2m";
 pub const C_CYAN: &str = "\x1B[36m";
 pub const C_GREEN: &str = "\x1B[32m";

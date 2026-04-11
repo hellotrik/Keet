@@ -3,10 +3,10 @@ name: CI
 on:
   push:
     branches:
-      - main
+      - ratatui
   pull_request:
     branches:
-      - main
+      - ratatui
 
 jobs:
   build:

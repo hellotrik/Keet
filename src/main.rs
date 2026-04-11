@@ -26,6 +26,7 @@ mod player_ratatui;
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -42,11 +43,65 @@ use state::{PlayerState, UiState, RgMode, VizMode, RING_BUFFER_SIZE, VIZ_BUFFER_
 use viz::{StatsMonitor, VizAnalyser};
 use audio::{build_stream, set_output_sample_rate, probe_sample_rate, fix_bluetooth_sample_rate};
 use decode::decode_playlist;
-use playlist::{build_playlist, shuffle_list, read_metadata};
+use playlist::{build_playlist, shuffle_list};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use ui::{poll_input, format_time};
 use resume::{build_resume_state, save_state, load_state};
+
+/// 缓冲等待阶段在 UI 上显示的简要技术行（避免主线程在解码前卡住不刷新）。
+fn wait_boot_track_info_line(state: &PlayerState) -> String {
+    if !state.track_info_ready.load(Ordering::Relaxed) {
+        return "正在打开与探测格式…".to_string();
+    }
+    let channels = state.channels.load(Ordering::Relaxed);
+    let bits = state.bits_per_sample.load(Ordering::Relaxed);
+    let ch_str = match channels {
+        1 => "mono".to_string(),
+        2 => "stereo".to_string(),
+        n => format!("{}ch", n),
+    };
+    let buf = state.buffer_level.load(Ordering::Relaxed);
+    let pct = ((buf as u64).saturating_mul(100) / RING_BUFFER_SIZE as u64).min(100) as u32;
+    format!(
+        "{} • {}bit {} • 缓冲环 {}%",
+        format_time(state.total_secs()),
+        bits,
+        ch_str,
+        pct
+    )
+}
+
+/// 歌词从内嵌/网络加载放到后台线程，避免大文件 `read_metadata_full` 与 HTTP 阻塞 UI。
+fn spawn_lyrics_background(
+    path: PathBuf,
+    index: usize,
+    cache: Arc<metadata::MetadataCache>,
+    duration_secs: Option<u32>,
+    ui: &mut UiState,
+) {
+    ui.lyrics_scroll = 0;
+    ui.lyrics_auto_scroll = true;
+    if let Some(s) = cache.lyrics(index) {
+        ui.lyrics = Some(lyrics::parse_lyrics(&s));
+        ui.lyrics_receiver = None;
+        return;
+    }
+    ui.lyrics = None;
+    let (tx, rx) = mpsc::channel();
+    ui.lyrics_receiver = Some(rx);
+    thread::spawn(move || {
+        let embedded = metadata::read_lyrics(&path);
+        let fetched = embedded.or_else(|| {
+            let (a, t) = cache.artist_title(index);
+            match (a, t) {
+                (Some(a), Some(t)) => lyrics::fetch_lrclib(&a, &t, duration_secs),
+                _ => None,
+            }
+        });
+        let _ = tx.send(fetched.map(|s| lyrics::parse_lyrics(&s)));
+    });
+}
 
 #[cfg(target_os = "macos")]
 fn choose_folder_macos() -> Option<String> {
@@ -784,10 +839,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.buffer_level.store(0, Ordering::Relaxed);
         if let Ok(mut err) = state.decode_error.lock() { *err = None; }
 
-        let track_path = &playlist[ui.current];
-        let mut filename = read_metadata(track_path)
-            .unwrap_or_else(|| track_path.file_name().unwrap_or_default().to_string_lossy().into_owned());
-        let mut track_ext = track_path.extension()
+        let cur_track = playlist[ui.current].clone();
+        let track_path = cur_track.as_path();
+        // 不在主线程做 symphonia 全量扫标签（大文件会卡 UI）；标题由后台 metadata 扫完后在缓存中更新。
+        let mut track_ext = track_path
+            .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
 
@@ -822,7 +878,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             prod_for_thread // Return producer ownership
         });
 
-        // Wait for track info and initial buffer fill
+        // Wait for track info and initial buffer fill（期间定期重绘，避免界面像卡死）
+        let mut last_wait_ui = Instant::now();
         while (!state.track_info_ready.load(Ordering::Relaxed)
                || state.buffer_level.load(Ordering::Relaxed) < RING_BUFFER_SIZE / 4)
               && !state.producer_done.load(Ordering::Relaxed)
@@ -833,8 +890,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 save_state(&build_resume_state(&ui, &playlist, &state, &eq_presets, &fx_presets, &cf_presets, &device_arg));
                 ui.pending_resume_save = false;
             }
-            thread::sleep(Duration::from_millis(20));
+            if last_wait_ui.elapsed() >= Duration::from_millis(40) {
+                let wait_name = ui.metadata_cache.display_name(ui.current, track_path);
+                let wait_line = wait_boot_track_info_line(&state);
+                let current_eq = &eq_presets[state.eq_index()];
+                let current_fx = &fx_presets[state.effects_index()].name;
+                let current_cf = &cf_presets[state.crossfeed_index()].name;
+                if ui.terminal_resized {
+                    ui.terminal_resized = false;
+                    let _ = tui_terminal.clear();
+                }
+                player_ratatui::draw_player(
+                    &mut tui_terminal,
+                    &state,
+                    &mut ui,
+                    &playlist,
+                    &wait_name,
+                    &wait_line,
+                    &track_ext,
+                    current_eq,
+                    current_fx,
+                    current_cf,
+                    &mut stats,
+                )?;
+                last_wait_ui = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(10));
         }
+
+        let mut filename = ui.metadata_cache.display_name(ui.current, track_path);
 
         // If producer failed before track info, skip
         if state.producer_done.load(Ordering::Relaxed)
@@ -870,20 +954,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut track_info = format!("{} • {}bit {} • {}", format_time(state.total_secs()), bits, ch_str, rate_str);
 
-        // Load lyrics: embedded tags → LRCLIB service (after track info is ready for duration)
-        let track_path = &playlist[ui.current];
         let dur = { let t = state.total_secs(); if t > 0.0 { Some(t as u32) } else { None } };
-        let raw_lyrics = ui.metadata_cache.lyrics(ui.current)
-            .or_else(|| metadata::read_lyrics(track_path))
-            .or_else(|| {
-                let (artist, title) = ui.metadata_cache.artist_title(ui.current);
-                if let (Some(a), Some(t)) = (artist, title) {
-                    lyrics::fetch_lrclib(&a, &t, dur)
-                } else { None }
-            });
-        ui.lyrics = raw_lyrics.map(|s| lyrics::parse_lyrics(&s));
-        ui.lyrics_scroll = 0;
-        ui.lyrics_auto_scroll = true;
+        spawn_lyrics_background(
+            cur_track.clone(),
+            ui.current,
+            Arc::clone(&ui.metadata_cache),
+            dur,
+            &mut ui,
+        );
 
         // Update OS media transport
         if let Some(ref mut mc) = media_controls {
@@ -944,40 +1022,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Update display info for new track
                     let new_path = &playlist[ui.current];
-                    filename = read_metadata(new_path)
-                        .unwrap_or_else(|| new_path.file_name().unwrap_or_default().to_string_lossy().into_owned());
+                    filename = ui.metadata_cache.display_name(ui.current, new_path);
                     track_ext = new_path.extension()
                         .map(|e| e.to_string_lossy().to_lowercase())
                         .unwrap_or_default();
 
-                    // Load lyrics: embedded tags → LRCLIB service
-                    let raw_lyrics = ui.metadata_cache.lyrics(ui.current)
-                        .or_else(|| metadata::read_lyrics(new_path));
-
-                    ui.lyrics_scroll = 0;
-                    ui.lyrics_auto_scroll = true;
-
-                    if let Some(l) = raw_lyrics {
-                        ui.lyrics = Some(lyrics::parse_lyrics(&l));
-                        ui.lyrics_receiver = None; // Cancel any pending fetches
-                    } else {
-                        ui.lyrics = None;
-                        let dur = { let t = state.total_secs(); if t > 0.0 { Some(t as u32) } else { None } };
-                        let (artist, title) = ui.metadata_cache.artist_title(ui.current);
-
-                        if let (Some(a), Some(t)) = (artist, title) {
-                            let (tx, rx) = std::sync::mpsc::channel();
-                            ui.lyrics_receiver = Some(rx);
-
-                            std::thread::spawn(move || {
-                                let res = lyrics::fetch_lrclib(&a, &t, dur)
-                                    .map(|s| lyrics::parse_lyrics(&s));
-                                let _ = tx.send(res);
-                            });
-                        } else {
-                            ui.lyrics_receiver = None;
-                        }
-                    }
+                    let dur = { let t = state.total_secs(); if t > 0.0 { Some(t as u32) } else { None } };
+                    spawn_lyrics_background(
+                        new_path.to_path_buf(),
+                        ui.current,
+                        Arc::clone(&ui.metadata_cache),
+                        dur,
+                        &mut ui,
+                    );
 
                     let src_rate = state.sample_rate.load(Ordering::Relaxed) as u32;
                     let channels = state.channels.load(Ordering::Relaxed);

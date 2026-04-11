@@ -259,10 +259,6 @@ fn read_metadata_full(path: &Path) -> Option<CachedMeta> {
     })
 }
 
-pub fn read_metadata_display(path: &Path) -> Option<String> {
-    read_metadata_full(path).map(|m| m.display)
-}
-
 /// Read only embedded lyrics from a file (for tracks not yet in the metadata cache).
 pub fn read_lyrics(path: &Path) -> Option<String> {
     read_metadata_full(path).and_then(|m| m.lyrics)

@@ -496,6 +496,16 @@ pub struct CellRect {
     pub h: u16,
 }
 
+/// 主界面进度行（▶/⏸ 与进度条）的鼠标动作，与键盘 Space / ← / → 语义对齐。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransportMouseAction {
+    TogglePause,
+    /// 与左方向键一致：快退约 10 秒。
+    SeekBack,
+    /// 与右方向键一致：快进约 10 秒。
+    SeekForward,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
@@ -519,6 +529,8 @@ pub struct UiState {
     pub banner_text: String,
     /// 每帧由 [`crate::player_ratatui`] 重算：banner 底部热键的点击区域。
     pub banner_hotkey_regions: Vec<(CellRect, BannerHotkey)>,
+    /// 每帧重算：播放图标与进度条左/右半块的命中区。
+    pub transport_click_regions: Vec<(CellRect, TransportMouseAction)>,
     pub playlist_dirty: bool,
     pub current_track_removed: bool,
     pub terminal_resized: bool,
@@ -560,6 +572,7 @@ impl UiState {
             banner_lines: 0,
             banner_text: String::new(),
             banner_hotkey_regions: Vec::new(),
+            transport_click_regions: Vec::new(),
             playlist_dirty: false,
             current_track_removed: false,
             terminal_resized: false,

@@ -2,7 +2,7 @@
 //!
 //! **职责**：用单帧 `Terminal::draw` 替代原 `print_status` 的手写光标与 ANSI，减轻 resize 与换行错位。
 //! **设计**：与 [`crate::idle_ratatui`] 共用同一 [`Terminal`]；子区域用 `Block` / `Paragraph` / `List` 组合。
-//! **输入**：键盘仍由 [`crate::ui::poll_input`] 负责；本模块每帧写入 [`UiState::banner_hotkey_regions`] 供鼠标命中；每帧可调用 [`UiState::take_status`] 一次以与旧逻辑一致。
+//! **输入**：键盘仍由 [`crate::ui::poll_input`] 负责；每帧写入 [`UiState::banner_hotkey_regions`]、[`UiState::transport_click_regions`] 供鼠标命中；每帧可调用 [`UiState::take_status`] 一次以与旧逻辑一致。
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -16,8 +16,8 @@ use ratatui::{Frame, Terminal};
 
 use crate::eq::{self, EqPreset};
 use crate::state::{
-    BannerHotkey, CellRect, InputMode, PlayerState, UiState, ViewMode, VizMode, VizStyle,
-    RING_BUFFER_SIZE,
+    BannerHotkey, CellRect, InputMode, PlayerState, TransportMouseAction, UiState, ViewMode,
+    VizMode, VizStyle, RING_BUFFER_SIZE,
 };
 use crate::ui::format_time;
 use crate::viz::{
@@ -246,6 +246,8 @@ fn draw_player_frame(
     stats: &mut StatsMonitor,
     status_flash: Option<&str>,
 ) {
+    ui.transport_click_regions.clear();
+
     let area = frame.area();
     let term_w = area.width as usize;
 
@@ -426,7 +428,19 @@ fn draw_player_frame(
                 ])
                 .split(body_rect);
 
-            render_header_block(frame, chunks[0], &line1, &line2, eq_line, &eq_curve);
+            render_header_block(
+                frame,
+                chunks[0],
+                &line1,
+                &line2,
+                eq_line,
+                &eq_curve,
+                ui,
+                icon,
+                cur.as_str(),
+                tot.as_str(),
+                bar_str.as_str(),
+            );
             render_viz_block(frame, chunks[1], state, viz_mode, viz_style);
             let list_rows = chunks[2].height as usize;
             render_playlist_list(frame, chunks[2], ui, playlist, list_rows, term_w);
@@ -443,7 +457,19 @@ fn draw_player_frame(
                 ])
                 .split(body_rect);
 
-            render_header_block(frame, chunks[0], &line1, &line2, eq_line, &eq_curve);
+            render_header_block(
+                frame,
+                chunks[0],
+                &line1,
+                &line2,
+                eq_line,
+                &eq_curve,
+                ui,
+                icon,
+                cur.as_str(),
+                tot.as_str(),
+                bar_str.as_str(),
+            );
             render_viz_block(frame, chunks[1], state, viz_mode, viz_style);
             let lyric_rows = chunks[2].height as usize;
             render_lyrics_lines(frame, chunks[2], state, ui, lyric_rows);
@@ -461,7 +487,19 @@ fn draw_player_frame(
                 ])
                 .split(body_rect);
 
-            render_header_block(frame, chunks[0], &line1, &line2, eq_line, &eq_curve);
+            render_header_block(
+                frame,
+                chunks[0],
+                &line1,
+                &line2,
+                eq_line,
+                &eq_curve,
+                ui,
+                icon,
+                cur.as_str(),
+                tot.as_str(),
+                bar_str.as_str(),
+            );
             render_viz_block(frame, chunks[1], state, viz_mode, viz_style);
             if let Some(msg) = status_flash {
                 let area = chunks[3];
@@ -506,6 +544,83 @@ fn sync_playlist_scroll(ui: &mut UiState, playlist: &[PathBuf], visible_rows: us
     ui.scroll_offset = ui.scroll_offset.min(max_offset);
 }
 
+/// 播放/暂停符号在常见终端里的列宽（`chars().count()` 常为 1，但实际占 2 格，会导致命中区偏左且过窄）。
+fn transport_icon_display_cols(icon: &str) -> u16 {
+    let mut cols: u16 = 0;
+    for ch in icon.chars() {
+        cols = cols.saturating_add(match ch {
+            '\u{25b6}' | '\u{25b7}' // ▶ ▷
+            | '\u{23f8}' | '\u{23f9}' | '\u{23fa}' | '\u{23ef}' // ⏸ ⏹ ⏺ ⏯
+            | '\u{25b0}' | '\u{25b1}' | '\u{25b2}' | '\u{25bc}' => 2,
+            _ => {
+                if ch.is_ascii() {
+                    1
+                } else {
+                    2
+                }
+            }
+        });
+    }
+    cols.max(1)
+}
+
+/// 登记播放/暂停整块（行首两格 + 图标 + `[cur/tot]` 及后随空格）与进度条左/右快退快进区；假定等宽单元格与单行无折行。
+fn register_transport_clicks(
+    ui: &mut UiState,
+    inner: Rect,
+    line2_row: u16,
+    icon: &str,
+    cur: &str,
+    tot: &str,
+    bar_str: &str,
+) {
+    let y = inner.y.saturating_add(line2_row);
+    let icon_cols = transport_icon_display_cols(icon);
+    let time_bracket = format!(" [{cur}/{tot}] ");
+    // 从行首到进度条之前：两格缩进 + 图标(按列宽) + ` [cur/tot] `，整块作为播放/暂停命中区。
+    let prefix_to_bar = 2u16
+        .saturating_add(icon_cols)
+        .saturating_add(time_bracket.chars().count() as u16);
+    let bw = bar_str.chars().count().max(1) as u16;
+
+    ui.transport_click_regions.push((
+        CellRect {
+            x: inner.x,
+            y,
+            w: prefix_to_bar,
+            h: 1,
+        },
+        TransportMouseAction::TogglePause,
+    ));
+
+    let bar_x = inner.x.saturating_add(prefix_to_bar);
+    let left_w = bw / 2;
+    let right_w = bw.saturating_sub(left_w);
+    if left_w > 0 {
+        ui.transport_click_regions.push((
+            CellRect {
+                x: bar_x,
+                y,
+                w: left_w,
+                h: 1,
+            },
+            TransportMouseAction::SeekBack,
+        ));
+    }
+    if right_w > 0 {
+        ui.transport_click_regions.push((
+            CellRect {
+                x: bar_x.saturating_add(left_w),
+                y,
+                w: right_w,
+                h: 1,
+            },
+            TransportMouseAction::SeekForward,
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_header_block(
     frame: &mut Frame,
     area: Rect,
@@ -513,6 +628,11 @@ fn render_header_block(
     line2: &Line,
     eq_line: bool,
     eq_curve: &str,
+    ui: &mut UiState,
+    transport_icon: &str,
+    transport_cur: &str,
+    transport_tot: &str,
+    transport_bar: &str,
 ) {
     if area.height == 0 {
         return;
@@ -527,9 +647,19 @@ fn render_header_block(
         row += 1;
     }
     if inner.height > row {
+        let line2_row = row;
         frame.render_widget(
             Paragraph::new(line2.clone()).wrap(Wrap { trim: true }),
             row_rect(inner, row),
+        );
+        register_transport_clicks(
+            ui,
+            inner,
+            line2_row,
+            transport_icon,
+            transport_cur,
+            transport_tot,
+            transport_bar,
         );
         row += 1;
     }

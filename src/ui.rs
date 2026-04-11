@@ -10,7 +10,7 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal;
 
-use crate::state::{BannerHotkey, InputMode, PlayerState, UiState, ViewMode};
+use crate::state::{BannerHotkey, CellRect, InputMode, PlayerState, TransportMouseAction, UiState, ViewMode};
 
 #[cfg(target_os = "macos")]
 fn choose_path_with_dialog_macos() -> Option<PathBuf> {
@@ -263,14 +263,31 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
             }
             let col = me.column;
             let row = me.row;
-            for (r, hk) in &ui.banner_hotkey_regions {
-                if col >= r.x
+            let in_cell = |r: &CellRect| {
+                col >= r.x
                     && col < r.x.saturating_add(r.w)
                     && row >= r.y
                     && row < r.y.saturating_add(r.h)
-                {
+            };
+
+            let mut hit_chrome = false;
+            for (r, hk) in &ui.banner_hotkey_regions {
+                if in_cell(r) {
                     apply_banner_hotkey(state, ui, playlist, *hk);
+                    hit_chrome = true;
                     break;
+                }
+            }
+            if !hit_chrome {
+                for (r, act) in &ui.transport_click_regions {
+                    if in_cell(r) {
+                        match act {
+                            TransportMouseAction::TogglePause => state.toggle_pause(),
+                            TransportMouseAction::SeekBack => state.seek(-10),
+                            TransportMouseAction::SeekForward => state.seek(10),
+                        }
+                        break;
+                    }
                 }
             }
             continue;

@@ -34,6 +34,7 @@ fn draw_idle_frame(
     cf_presets: &[CrossfeedPreset],
 ) {
     ui.banner_hotkey_regions.clear();
+    ui.transport_click_regions.clear();
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)

@@ -499,10 +499,24 @@ pub struct UiState {
     pub lyrics_scroll: usize,
     pub lyrics_auto_scroll: bool,
     pub lyrics_offset: f64, // seconds, positive = lyrics later, negative = lyrics earlier
+
+    /// Random order (re-shuffle on each repeat cycle when enabled).
+    pub shuffle: bool,
+    /// Loop playlist when the end is reached (rescans directories each cycle).
+    pub repeat: bool,
+    /// Playlist finished with `repeat == false`: stay in TUI until user opens new source or quits.
+    pub session_idle: bool,
+    /// After toggling shuffle/repeat from keyboard, persist resume state on next main-loop tick.
+    pub pending_resume_save: bool,
 }
 
 impl UiState {
-    pub fn new(source_paths: Vec<PathBuf>, metadata_cache: std::sync::Arc<crate::metadata::MetadataCache>) -> Self {
+    pub fn new(
+        source_paths: Vec<PathBuf>,
+        metadata_cache: std::sync::Arc<crate::metadata::MetadataCache>,
+        shuffle: bool,
+        repeat: bool,
+    ) -> Self {
         Self {
             view_mode: ViewMode::Player,
             input_mode: InputMode::Normal,
@@ -525,6 +539,10 @@ impl UiState {
             lyrics_scroll: 0,
             lyrics_auto_scroll: true,
             lyrics_offset: 0.0,
+            shuffle,
+            repeat,
+            session_idle: false,
+            pending_resume_save: false,
         }
     }
 

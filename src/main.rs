@@ -179,8 +179,6 @@ fn build_resume_state(
     ui: &state::UiState,
     playlist: &[std::path::PathBuf],
     player_state: &state::PlayerState,
-    shuffle: bool,
-    repeat: bool,
     eq_presets: &[eq::EqPreset],
     fx_presets: &[effects::EffectsPreset],
     cf_presets: &[crossfeed::CrossfeedPreset],
@@ -192,8 +190,8 @@ fn build_resume_state(
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default(),
         position_secs: player_state.time_secs(),
-        shuffle,
-        repeat,
+        shuffle: ui.shuffle,
+        repeat: ui.repeat,
         volume: player_state.volume.load(std::sync::atomic::Ordering::Relaxed),
         eq_preset: eq_presets[player_state.eq_index()].name.clone(),
         effects_preset: fx_presets[player_state.effects_index()].name.clone(),
@@ -286,6 +284,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Y            Toggle lyrics view (synced LRC auto-scrolls)");
         println!("  S            Save playlist as M3U");
         println!("  R            Rescan folders for new files");
+        println!("  O            Open folder/file path (typed)");
+        println!("  P            Pick folder (system dialog)");
+        println!("  G            Toggle shuffle (random order; reshuffle each loop cycle)");
+        println!("  T            Toggle repeat (loop playlist)");
         println!("  Q / Esc      Quit");
         println!();
         println!("\x1B[1mPLAYLIST VIEW\x1B[0m  (press L)");
@@ -570,7 +572,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     writeln!(banner, "\n{0}{{Space}}{1} Pause  {0}{{↑/↓}}{1} Track  {0}{{←/→}}{1} Seek  {0}{{+/-}}{1} Vol  {0}{{[/]}}{1} Bal  {0}{{Q}}{1} Quit",
         "\x1B[2m", "\x1B[0m").ok();
-    writeln!(banner, "{0}{{E}}{1} EQ  {0}{{X}}{1} FX  {0}{{C}}{1} Crossfeed  {0}{{F}}{1} Fader  {0}{{V/B}}{1} Viz  {0}{{I}}{1} Info  {0}{{L}}{1} List  {0}{{Y}}{1} Lyrics  {0}{{O}}{1} Open  {0}{{P}}{1} Pick\n",
+    writeln!(banner, "{0}{{E}}{1} EQ  {0}{{X}}{1} FX  {0}{{C}}{1} Crossfeed  {0}{{F}}{1} Fader  {0}{{V/B}}{1} Viz  {0}{{I}}{1} Info  {0}{{L}}{1} List  {0}{{Y}}{1} Lyrics  {0}{{O}}{1} Open  {0}{{P}}{1} Pick  {0}{{G}}{1} Shuffle  {0}{{T}}{1} Loop\n",
         "\x1B[2m", "\x1B[0m").ok();
 
     // Print banner and count its lines
@@ -584,7 +586,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     io::stdout().flush().ok();
 
     let metadata_cache = metadata::MetadataCache::new(playlist.len());
-    let mut ui = UiState::new(source_paths, std::sync::Arc::clone(&metadata_cache));
+    let mut ui = UiState::new(source_paths, std::sync::Arc::clone(&metadata_cache), shuffle, repeat);
     ui.banner_lines = banner_lines;
     ui.banner_text = banner;
 
@@ -692,9 +694,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     'playlist: loop {
         if state.should_quit() { break; }
 
+        // After last track with repeat off: stay in TUI (open new music, toggle G/T, quit).
+        if ui.session_idle {
+            let mut prev_idle_viz = usize::MAX;
+            let mut last_idle_ui = Instant::now();
+            let idle_name = "(已播完)";
+            let idle_info = "按 O / P 添加音乐 · G 随机 · T 列表循环 · Q 退出";
+            let idle_ext = "";
+            while ui.session_idle && !state.should_quit() {
+                if poll_input(&state, &mut ui, &mut playlist) {
+                    terminal::disable_raw_mode()?;
+                    print!("\x1B[?25h");
+                    if prev_idle_viz != usize::MAX {
+                        let up = 2 + prev_idle_viz;
+                        print!("\x1B[{}F", up);
+                    }
+                    print!("\x1B[J");
+                    io::stdout().flush().ok();
+                    save_state(&build_resume_state(&ui, &playlist, &state, &eq_presets, &fx_presets, &cf_presets, &device_arg));
+                    if let Some(id) = hog_device_id {
+                        audio::release_exclusive_mode(id);
+                    }
+                    return Ok(());
+                }
+                if ui.pending_resume_save {
+                    save_state(&build_resume_state(&ui, &playlist, &state, &eq_presets, &fx_presets, &cf_presets, &device_arg));
+                    ui.pending_resume_save = false;
+                }
+                if last_idle_ui.elapsed() >= Duration::from_millis(50) {
+                    if ui.terminal_resized {
+                        ui.terminal_resized = false;
+                        print!("\x1B[0m\x1B[2J\x1B[H{}", ui.banner_text.replace('\n', "\r\n"));
+                        prev_idle_viz = usize::MAX;
+                    }
+                    let current_eq = &eq_presets[state.eq_index()];
+                    let current_fx = &fx_presets[state.effects_index()].name;
+                    let current_cf = &cf_presets[state.crossfeed_index()].name;
+                    prev_idle_viz = print_status(
+                        &state, &mut ui, idle_name, idle_info, idle_ext,
+                        current_eq, current_fx, current_cf,
+                        &mut stats, prev_idle_viz, &playlist,
+                    );
+                    last_idle_ui = Instant::now();
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            if state.should_quit() { break 'playlist; }
+            continue 'playlist;
+        }
+
         // Repeat-cycle check
         if ui.current >= playlist.len() {
-            if repeat {
+            if ui.repeat {
                 let old_playlist = playlist.clone();
 
                 let has_dir = ui.source_paths.iter().any(|p| p.is_dir());
@@ -718,7 +769,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 !ui.removed_paths.contains(&key)
                             });
                         }
-                        if shuffle { shuffle_list(&mut combined); }
+                        if ui.shuffle { shuffle_list(&mut combined); }
                         playlist = combined;
                         state.total_tracks.store(playlist.len(), Ordering::Relaxed);
                     }
@@ -731,7 +782,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                         state.total_tracks.store(playlist.len(), Ordering::Relaxed);
                     }
-                    if shuffle { shuffle_list(&mut playlist); }
+                    if ui.shuffle { shuffle_list(&mut playlist); }
                 }
 
                 // Reindex metadata cache
@@ -748,7 +799,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 ui.current = 0;
             } else {
-                break;
+                ui.session_idle = true;
+                continue 'playlist;
             }
         }
 
@@ -806,6 +858,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
               && !state.should_quit()
         {
             poll_input(&state, &mut ui, &mut playlist);
+            if ui.pending_resume_save {
+                save_state(&build_resume_state(&ui, &playlist, &state, &eq_presets, &fx_presets, &cf_presets, &device_arg));
+                ui.pending_resume_save = false;
+            }
             thread::sleep(Duration::from_millis(20));
         }
 
@@ -881,13 +937,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 print!("\x1B[J");
                 io::stdout().flush().ok();
-                save_state(&build_resume_state(&ui, &playlist, &state, shuffle, repeat, &eq_presets, &fx_presets, &cf_presets, &device_arg));
+                save_state(&build_resume_state(&ui, &playlist, &state, &eq_presets, &fx_presets, &cf_presets, &device_arg));
                 if let Some(id) = hog_device_id {
                     audio::release_exclusive_mode(id);
                 }
                 // Producer will exit when state.should_quit() is true
                 let _ = producer_handle.join();
                 break 'playlist;
+            }
+
+            if ui.pending_resume_save {
+                save_state(&build_resume_state(&ui, &playlist, &state, &eq_presets, &fx_presets, &cf_presets, &device_arg));
+                ui.pending_resume_save = false;
             }
 
             // Check for track transitions from the producer
@@ -971,7 +1032,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         media_keys::update_playback(mc, state.is_paused(), 0.0);
                     }
 
-                    save_state(&build_resume_state(&ui, &playlist, &state, shuffle, repeat, &eq_presets, &fx_presets, &cf_presets, &device_arg));
+                    save_state(&build_resume_state(&ui, &playlist, &state, &eq_presets, &fx_presets, &cf_presets, &device_arg));
                 }
             }
 
@@ -1095,7 +1156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => break 'playlist,
                 }
 
-                save_state(&build_resume_state(&ui, &playlist, &state, shuffle, repeat, &eq_presets, &fx_presets, &cf_presets, &device_arg));
+                save_state(&build_resume_state(&ui, &playlist, &state, &eq_presets, &fx_presets, &cf_presets, &device_arg));
                 ui.current = playlist.len(); // Will trigger repeat-cycle or exit
                 continue 'playlist;
             }

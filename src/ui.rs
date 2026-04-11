@@ -146,6 +146,7 @@ fn switch_source_paths(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec
     ui.filtered_indices.clear();
     ui.view_mode = ViewMode::Player;
     ui.playlist_dirty = true;
+    ui.session_idle = false;
 
     state.total_tracks.store(playlist.len(), Ordering::Relaxed);
     state.current_track.store(ui.current, Ordering::Relaxed);
@@ -323,7 +324,9 @@ pub fn print_status(state: &PlayerState, ui: &mut UiState, name: &str, track_inf
     } else {
         String::new()
     };
-    let line2 = format!("  {icon_color}{icon}{C_RESET} {C_BOLD}[{cur}/{tot}]{C_RESET} {C_GREEN}{bar_filled}{C_RESET} {C_DIM}vol:{vol}%{eq_display}{fx_display}{cf_display}{clip_display}{bal_display} {fader} buf:{buf_pct}%{stats_display} {{V}}:{next_viz} {{B}}:{next_style}{C_RESET}");
+    let play_mode = if ui.shuffle { "shuf" } else { "seq" };
+    let loop_mode = if ui.repeat { "loop" } else { "once" };
+    let line2 = format!("  {icon_color}{icon}{C_RESET} {C_BOLD}[{cur}/{tot}]{C_RESET} {C_GREEN}{bar_filled}{C_RESET} {C_DIM}{play_mode}/{loop_mode} vol:{vol}%{eq_display}{fx_display}{cf_display}{clip_display}{bal_display} {fader} buf:{buf_pct}%{stats_display} {{V}}:{next_viz} {{B}}:{next_style}{C_RESET}");
     print!("\r\x1B[K{}", truncate_ansi(&line2, term_w));
 
     // EQ curve visualization (when non-Flat preset is active)
@@ -670,6 +673,28 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
                 }
                 KeyEvent { code: KeyCode::Char('r'), .. } => {
                     rescan(state, ui, playlist);
+                }
+                KeyEvent { code: KeyCode::Char('g'), .. } => {
+                    ui.shuffle = !ui.shuffle;
+                    ui.pending_resume_save = true;
+                    ui.set_status(if ui.shuffle {
+                        "随机播放：开（再次列表循环时重排）".to_string()
+                    } else {
+                        "随机播放：关".to_string()
+                    });
+                }
+                KeyEvent { code: KeyCode::Char('t'), .. } => {
+                    ui.repeat = !ui.repeat;
+                    ui.pending_resume_save = true;
+                    if ui.session_idle && ui.repeat && !playlist.is_empty() {
+                        ui.current = 0;
+                        ui.session_idle = false;
+                    }
+                    ui.set_status(if ui.repeat {
+                        "列表循环：开".to_string()
+                    } else {
+                        "列表循环：关".to_string()
+                    });
                 }
                 KeyEvent { code: KeyCode::Char('o'), .. } => {
                     if let Some(p) = read_path_from_user(ui, "打开目录/文件: ") {

@@ -33,7 +33,8 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind};
+use crossterm::execute;
 use crossterm::terminal;
 use rtrb::RingBuffer;
 
@@ -196,6 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Restore terminal on panic so it doesn't stay in raw mode
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = terminal::disable_raw_mode();
         print!("\x1B[?25h"); // Show cursor
         let _ = io::stdout().flush();
@@ -546,6 +548,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // OS media transport controls (media keys, AirPods, Bluetooth headphones)
     let mut media_controls = media_keys::setup(Arc::clone(&state));
 
+    let banner_for_tui = banner.clone();
     writeln!(banner, "\n{0}{{Space}}{1} Pause  {0}{{↑/↓}}{1} Track  {0}{{←/→}}{1} Seek  {0}{{+/-}}{1} Vol  {0}{{[/]}}{1} Bal  {0}{{Q}}{1} Quit",
         "\x1B[2m", "\x1B[0m").ok();
     writeln!(banner, "{0}{{E}}{1} EQ  {0}{{X}}{1} FX  {0}{{C}}{1} Crossfeed  {0}{{F}}{1} Fader  {0}{{V/B}}{1} Viz  {0}{{I}}{1} Info  {0}{{L}}{1} List  {0}{{Y}}{1} Lyrics  {0}{{O}}{1} Open  {0}{{P}}{1} Pick  {0}{{G}}{1} Shuffle  {0}{{T}}{1} Loop\n",
@@ -553,9 +556,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Print banner and count its lines
     print!("{}", banner);
-    let banner_lines = banner.lines().count();
+    let banner_lines = banner_for_tui.lines().count() + 2;
 
     terminal::enable_raw_mode()?;
+    let _ = execute!(io::stdout(), EnableMouseCapture);
 
     // Hide cursor to prevent flickering
     print!("\x1B[?25l");
@@ -568,7 +572,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metadata_cache = metadata::MetadataCache::new(playlist.len());
     let mut ui = UiState::new(source_paths, std::sync::Arc::clone(&metadata_cache), shuffle, repeat);
     ui.banner_lines = banner_lines;
-    ui.banner_text = banner;
+    ui.banner_text = banner_for_tui;
 
     // Windows terminals can start with a mismatched cursor/CRLF state after resume.
     // Force a full redraw on first UI tick (same code path as manual resize).
@@ -685,6 +689,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &device_arg,
             )?;
             if quit_idle {
+                execute!(io::stdout(), DisableMouseCapture)?;
                 terminal::disable_raw_mode()?;
                 print!("\x1B[?25h");
                 print!("\x1B[J");
@@ -1193,6 +1198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     drop(tui_terminal);
 
+    execute!(io::stdout(), DisableMouseCapture)?;
     terminal::disable_raw_mode()?;
 
     print!("\x1B[?25h");

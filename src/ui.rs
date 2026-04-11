@@ -3,10 +3,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::sync::atomic::Ordering;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
+};
+use crossterm::execute;
 use crossterm::terminal;
 
-use crate::state::{PlayerState, ViewMode, InputMode, UiState};
+use crate::state::{BannerHotkey, InputMode, PlayerState, UiState, ViewMode};
 
 #[cfg(target_os = "macos")]
 fn choose_path_with_dialog_macos() -> Option<PathBuf> {
@@ -71,9 +75,14 @@ fn read_path_from_user(ui: &mut UiState, prompt: &str) -> Option<PathBuf> {
     //
     // Important: don't let the prompt permanently shift the TUI down.
     // We save/restore the cursor position and clear the prompt line(s) afterwards.
+    //
+    // 必须同时关闭 SGR 鼠标：否则鼠标移动/点击会以 ^[[<… 序列进入 stdin，
+    // 在行缓冲模式下被 echo 到提示行（用户按 O 打开路径时尤为明显）。
     print!("\x1B[s"); // Save cursor position
     let _ = io::stdout().flush();
 
+    let _ = execute!(io::stdout(), DisableMouseCapture);
+    let _ = io::stdout().flush();
     let _ = terminal::disable_raw_mode();
     print!("\n\r\x1B[0m\x1B[?25h\x1B[2K{prompt}");
     let _ = io::stdout().flush();
@@ -86,6 +95,8 @@ fn read_path_from_user(ui: &mut UiState, prompt: &str) -> Option<PathBuf> {
     let _ = io::stdout().flush();
 
     let _ = terminal::enable_raw_mode();
+    let _ = execute!(io::stdout(), EnableMouseCapture);
+    let _ = io::stdout().flush();
     print!("\x1B[?25l");
     let _ = io::stdout().flush();
 
@@ -164,6 +175,75 @@ pub fn format_time(secs: f64) -> String {
     format!("{:02}:{:02}", (secs / 60.0) as u32, (secs % 60.0) as u32)
 }
 
+/// 执行 banner 第二行热键对应的动作（键盘与鼠标共用）。
+fn apply_banner_hotkey(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBuf>, hk: BannerHotkey) {
+    match hk {
+        BannerHotkey::Eq => state.cycle_eq(),
+        BannerHotkey::Fx => state.cycle_effects(),
+        BannerHotkey::Crossfeed => state.cycle_crossfeed(),
+        BannerHotkey::Fader => state.toggle_pre_fader(),
+        BannerHotkey::VizMode => state.cycle_viz_mode(),
+        BannerHotkey::VizStyle => state.toggle_viz_style(),
+        BannerHotkey::Info => state.toggle_stats(),
+        BannerHotkey::List => {
+            ui.view_mode = match ui.view_mode {
+                ViewMode::Player | ViewMode::Lyrics => {
+                    ui.cursor = ui.current;
+                    ensure_cursor_visible(ui, playlist);
+                    ViewMode::Playlist
+                }
+                ViewMode::Playlist => ViewMode::Player,
+            };
+        }
+        BannerHotkey::Lyrics => {
+            ui.view_mode = match ui.view_mode {
+                ViewMode::Player | ViewMode::Playlist => {
+                    ui.lyrics_scroll = 0;
+                    ui.lyrics_auto_scroll = true;
+                    ViewMode::Lyrics
+                }
+                ViewMode::Lyrics => ViewMode::Player,
+            };
+        }
+        BannerHotkey::Open => {
+            if let Some(p) = read_path_from_user(ui, "打开目录/文件: ") {
+                switch_source_paths(state, ui, playlist, p);
+            } else {
+                ui.set_status("已取消".to_string());
+            }
+        }
+        BannerHotkey::Pick => {
+            if let Some(p) = choose_path_with_dialog() {
+                switch_source_paths(state, ui, playlist, p);
+            } else {
+                ui.set_status("已取消".to_string());
+            }
+        }
+        BannerHotkey::Shuffle => {
+            ui.shuffle = !ui.shuffle;
+            ui.pending_resume_save = true;
+            ui.set_status(if ui.shuffle {
+                "随机播放：开（再次列表循环时重排）".to_string()
+            } else {
+                "随机播放：关".to_string()
+            });
+        }
+        BannerHotkey::LoopToggle => {
+            ui.repeat = !ui.repeat;
+            ui.pending_resume_save = true;
+            if ui.session_idle && ui.repeat && !playlist.is_empty() {
+                ui.current = 0;
+                ui.session_idle = false;
+            }
+            ui.set_status(if ui.repeat {
+                "列表循环：开".to_string()
+            } else {
+                "列表循环：关".to_string()
+            });
+        }
+    }
+}
+
 pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBuf>) -> bool {
     // Drain all pending events for responsive input
     while event::poll(Duration::ZERO).unwrap_or(false) {
@@ -171,6 +251,28 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
 
         if let Event::Resize(_, _) = ev {
             ui.terminal_resized = true;
+            continue;
+        }
+
+        if let Event::Mouse(me) = ev {
+            if me.kind != MouseEventKind::Down(MouseButton::Left) {
+                continue;
+            }
+            if !matches!(ui.input_mode, InputMode::Normal) {
+                continue;
+            }
+            let col = me.column;
+            let row = me.row;
+            for (r, hk) in &ui.banner_hotkey_regions {
+                if col >= r.x
+                    && col < r.x.saturating_add(r.w)
+                    && row >= r.y
+                    && row < r.y.saturating_add(r.h)
+                {
+                    apply_banner_hotkey(state, ui, playlist, *hk);
+                    break;
+                }
+            }
             continue;
         }
 
@@ -269,34 +371,16 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
                 KeyEvent { code: KeyCode::Down, .. } => state.prev(),
                 KeyEvent { code: KeyCode::Right, .. } => state.seek(10),
                 KeyEvent { code: KeyCode::Left, .. } => state.seek(-10),
-                KeyEvent { code: KeyCode::Char('v'), .. } => state.cycle_viz_mode(),
+                KeyEvent { code: KeyCode::Char('v'), .. } => apply_banner_hotkey(state, ui, playlist, BannerHotkey::VizMode),
                 KeyEvent { code: KeyCode::Char('+'), .. } |
                 KeyEvent { code: KeyCode::Char('='), .. } => state.volume_up(),
                 KeyEvent { code: KeyCode::Char('-'), .. } => state.volume_down(),
-                KeyEvent { code: KeyCode::Char('e'), .. } => state.cycle_eq(),
-                KeyEvent { code: KeyCode::Char('x'), .. } => state.cycle_effects(),
-                KeyEvent { code: KeyCode::Char('f'), .. } => state.toggle_pre_fader(),
-                KeyEvent { code: KeyCode::Char('b'), .. } => state.toggle_viz_style(),
-                KeyEvent { code: KeyCode::Char('l'), .. } => {
-                    ui.view_mode = match ui.view_mode {
-                        ViewMode::Player | ViewMode::Lyrics => {
-                            ui.cursor = ui.current;
-                            ensure_cursor_visible(ui, playlist);
-                            ViewMode::Playlist
-                        }
-                        ViewMode::Playlist => ViewMode::Player,
-                    };
-                }
-                KeyEvent { code: KeyCode::Char('y'), .. } => {
-                    ui.view_mode = match ui.view_mode {
-                        ViewMode::Player | ViewMode::Playlist => {
-                            ui.lyrics_scroll = 0;
-                            ui.lyrics_auto_scroll = true;
-                            ViewMode::Lyrics
-                        }
-                        ViewMode::Lyrics => ViewMode::Player,
-                    };
-                }
+                KeyEvent { code: KeyCode::Char('e'), .. } => apply_banner_hotkey(state, ui, playlist, BannerHotkey::Eq),
+                KeyEvent { code: KeyCode::Char('x'), .. } => apply_banner_hotkey(state, ui, playlist, BannerHotkey::Fx),
+                KeyEvent { code: KeyCode::Char('f'), .. } => apply_banner_hotkey(state, ui, playlist, BannerHotkey::Fader),
+                KeyEvent { code: KeyCode::Char('b'), .. } => apply_banner_hotkey(state, ui, playlist, BannerHotkey::VizStyle),
+                KeyEvent { code: KeyCode::Char('l'), .. } => apply_banner_hotkey(state, ui, playlist, BannerHotkey::List),
+                KeyEvent { code: KeyCode::Char('y'), .. } => apply_banner_hotkey(state, ui, playlist, BannerHotkey::Lyrics),
                 KeyEvent { code: KeyCode::Char('s'), .. } => {
                     ui.input_mode = InputMode::SavePlaylist(String::new());
                 }
@@ -304,48 +388,26 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
                     rescan(state, ui, playlist);
                 }
                 KeyEvent { code: KeyCode::Char('g'), .. } => {
-                    ui.shuffle = !ui.shuffle;
-                    ui.pending_resume_save = true;
-                    ui.set_status(if ui.shuffle {
-                        "随机播放：开（再次列表循环时重排）".to_string()
-                    } else {
-                        "随机播放：关".to_string()
-                    });
+                    apply_banner_hotkey(state, ui, playlist, BannerHotkey::Shuffle);
                 }
                 KeyEvent { code: KeyCode::Char('t'), .. } => {
-                    ui.repeat = !ui.repeat;
-                    ui.pending_resume_save = true;
-                    if ui.session_idle && ui.repeat && !playlist.is_empty() {
-                        ui.current = 0;
-                        ui.session_idle = false;
-                    }
-                    ui.set_status(if ui.repeat {
-                        "列表循环：开".to_string()
-                    } else {
-                        "列表循环：关".to_string()
-                    });
+                    apply_banner_hotkey(state, ui, playlist, BannerHotkey::LoopToggle);
                 }
                 KeyEvent { code: KeyCode::Char('o'), .. } => {
-                    if let Some(p) = read_path_from_user(ui, "打开目录/文件: ") {
-                        switch_source_paths(state, ui, playlist, p);
-                    } else {
-                        ui.set_status("已取消".to_string());
-                    }
+                    apply_banner_hotkey(state, ui, playlist, BannerHotkey::Open);
                 }
                 KeyEvent { code: KeyCode::Char('p'), .. } => {
-                    if let Some(p) = choose_path_with_dialog() {
-                        switch_source_paths(state, ui, playlist, p);
-                    } else {
-                        ui.set_status("已取消".to_string());
-                    }
+                    apply_banner_hotkey(state, ui, playlist, BannerHotkey::Pick);
                 }
                 KeyEvent { code: KeyCode::Char('q'), .. } |
                 KeyEvent { code: KeyCode::Esc, .. } => { state.quit(); return true; }
                 KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, .. } => {
                     state.quit(); return true;
                 }
-                KeyEvent { code: KeyCode::Char('c'), .. } => state.cycle_crossfeed(),
-                KeyEvent { code: KeyCode::Char('i'), .. } => state.toggle_stats(),
+                KeyEvent { code: KeyCode::Char('c'), .. } => {
+                    apply_banner_hotkey(state, ui, playlist, BannerHotkey::Crossfeed);
+                }
+                KeyEvent { code: KeyCode::Char('i'), .. } => apply_banner_hotkey(state, ui, playlist, BannerHotkey::Info),
                 KeyEvent { code: KeyCode::Char('['), .. } => state.balance_left(),
                 KeyEvent { code: KeyCode::Char(']'), .. } => state.balance_right(),
                 _ => {}

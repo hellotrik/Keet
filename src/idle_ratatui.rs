@@ -28,11 +28,12 @@ use crate::ui::poll_input;
 fn draw_idle_frame(
     frame: &mut Frame,
     state: &PlayerState,
-    ui: &UiState,
+    ui: &mut UiState,
     eq_presets: &[EqPreset],
     fx_presets: &[EffectsPreset],
     cf_presets: &[CrossfeedPreset],
 ) {
+    ui.banner_hotkey_regions.clear();
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)

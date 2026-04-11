@@ -2,7 +2,7 @@
 //!
 //! **职责**：用单帧 `Terminal::draw` 替代原 `print_status` 的手写光标与 ANSI，减轻 resize 与换行错位。
 //! **设计**：与 [`crate::idle_ratatui`] 共用同一 [`Terminal`]；子区域用 `Block` / `Paragraph` / `List` 组合。
-//! **输入**：不处理键盘（仍由 [`crate::ui::poll_input`] 负责）；每帧可调用 [`UiState::take_status`] 一次以与旧逻辑一致。
+//! **输入**：键盘仍由 [`crate::ui::poll_input`] 负责；本模块每帧写入 [`UiState::banner_hotkey_regions`] 供鼠标命中；每帧可调用 [`UiState::take_status`] 一次以与旧逻辑一致。
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -16,7 +16,8 @@ use ratatui::{Frame, Terminal};
 
 use crate::eq::{self, EqPreset};
 use crate::state::{
-    InputMode, PlayerState, UiState, ViewMode, VizMode, VizStyle, RING_BUFFER_SIZE,
+    BannerHotkey, CellRect, InputMode, PlayerState, UiState, ViewMode, VizMode, VizStyle,
+    RING_BUFFER_SIZE,
 };
 use crate::ui::format_time;
 use crate::viz::{
@@ -104,6 +105,97 @@ fn banner_plain(ui: &UiState) -> Text<'static> {
     )
 }
 
+fn key_chip_style() -> Style {
+    Style::default().fg(Color::White).bg(Color::Black)
+}
+
+fn banner_row_push_chip(
+    spans: &mut Vec<Span<'static>>,
+    regions: &mut Vec<(CellRect, BannerHotkey)>,
+    cx: &mut u16,
+    y: u16,
+    face: &str,
+    hk: BannerHotkey,
+) {
+    let cell = format!(" {face} ");
+    let w = cell.chars().count() as u16;
+    spans.push(Span::styled(cell, key_chip_style()));
+    regions.push((CellRect { x: *cx, y, w, h: 1 }, hk));
+    *cx = cx.saturating_add(w);
+}
+
+fn banner_row_push_label(spans: &mut Vec<Span<'static>>, cx: &mut u16, s: &str, dim: Style) {
+    *cx = cx.saturating_add(s.chars().count() as u16);
+    spans.push(Span::styled(s.to_string(), dim));
+}
+
+/// 在 banner 底部两行绘制快捷键提示：第一行灰字；第二行为黑底白字可点击热键并写入 `ui.banner_hotkey_regions`。
+fn render_banner_shortcut_rows(frame: &mut Frame, area: Rect, ui: &mut UiState) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let row0 = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1.min(area.height),
+    };
+    let row1 = Rect {
+        x: area.x,
+        y: area.y.saturating_add(row0.height),
+        width: area.width,
+        height: area.height.saturating_sub(row0.height),
+    };
+
+    let help0 = "{Space} Pause  {↑/↓} Track  {←/→} Seek  {+/-} Vol  {[/]} Bal  {Q} Quit";
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(help0, dim))).wrap(Wrap { trim: true }),
+        row0,
+    );
+
+    if row1.height == 0 {
+        return;
+    }
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut cx = row1.x;
+    let y = row1.y;
+    let regs = &mut ui.banner_hotkey_regions;
+
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "E", BannerHotkey::Eq);
+    banner_row_push_label(&mut spans, &mut cx, " EQ  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "X", BannerHotkey::Fx);
+    banner_row_push_label(&mut spans, &mut cx, " FX  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "C", BannerHotkey::Crossfeed);
+    banner_row_push_label(&mut spans, &mut cx, " Crossfeed  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "F", BannerHotkey::Fader);
+    banner_row_push_label(&mut spans, &mut cx, " Fader  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "V", BannerHotkey::VizMode);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "B", BannerHotkey::VizStyle);
+    banner_row_push_label(&mut spans, &mut cx, " Viz  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "I", BannerHotkey::Info);
+    banner_row_push_label(&mut spans, &mut cx, " Info  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "L", BannerHotkey::List);
+    banner_row_push_label(&mut spans, &mut cx, " List  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "Y", BannerHotkey::Lyrics);
+    banner_row_push_label(&mut spans, &mut cx, " Lyrics  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "O", BannerHotkey::Open);
+    banner_row_push_label(&mut spans, &mut cx, " Open  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "P", BannerHotkey::Pick);
+    banner_row_push_label(&mut spans, &mut cx, " Pick  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "G", BannerHotkey::Shuffle);
+    banner_row_push_label(&mut spans, &mut cx, " Shuffle  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "T", BannerHotkey::LoopToggle);
+    banner_row_push_label(&mut spans, &mut cx, " Loop", dim);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).wrap(Wrap { trim: true }),
+        row1,
+    );
+}
+
 /// 绘制主界面一帧（含 banner）。终端尺寸变化时由调用方先 [`Terminal::clear`]。
 pub fn draw_player<B: Backend>(
     terminal: &mut Terminal<B>,
@@ -166,12 +258,27 @@ fn draw_player_frame(
     let bblock = Block::default().borders(Borders::BOTTOM);
     let binner = bblock.inner(banner_rect);
     frame.render_widget(bblock, banner_rect);
+
+    ui.banner_hotkey_regions.clear();
+
+    let inner_h = binner.height;
+    let help_h: u16 = 2.min(inner_h);
+    let para_h = inner_h.saturating_sub(help_h).max(1);
+
+    let banner_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(para_h), Constraint::Length(help_h)])
+        .split(binner);
+
     frame.render_widget(
         Paragraph::new(banner_plain(ui))
             .wrap(Wrap { trim: true })
             .alignment(Alignment::Left),
-        binner,
+        banner_chunks[0],
     );
+    if help_h > 0 {
+        render_banner_shortcut_rows(frame, banner_chunks[1], ui);
+    }
 
     let viz_mode = state.viz_mode();
     let viz_style = state.viz_style();

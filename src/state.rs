@@ -469,6 +469,33 @@ pub enum ViewMode {
     Lyrics,
 }
 
+/// 顶部 banner 第二行可点击热键（与键盘 E/X/C/… 一一对应，用于鼠标命中）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BannerHotkey {
+    Eq,
+    Fx,
+    Crossfeed,
+    Fader,
+    VizMode,
+    VizStyle,
+    Info,
+    List,
+    Lyrics,
+    Open,
+    Pick,
+    Shuffle,
+    LoopToggle,
+}
+
+/// 终端单元格轴对齐矩形（与 crossterm / ratatui 坐标系一致，含 x/y 左上角）。
+#[derive(Clone, Copy, Debug)]
+pub struct CellRect {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
@@ -490,6 +517,8 @@ pub struct UiState {
     pub removed_paths: std::collections::HashSet<PathBuf>,
     pub banner_lines: usize,
     pub banner_text: String,
+    /// 每帧由 [`crate::player_ratatui`] 重算：banner 底部热键的点击区域。
+    pub banner_hotkey_regions: Vec<(CellRect, BannerHotkey)>,
     pub playlist_dirty: bool,
     pub current_track_removed: bool,
     pub terminal_resized: bool,
@@ -530,6 +559,7 @@ impl UiState {
             removed_paths: std::collections::HashSet::new(),
             banner_lines: 0,
             banner_text: String::new(),
+            banner_hotkey_regions: Vec::new(),
             playlist_dirty: false,
             current_track_removed: false,
             terminal_resized: false,

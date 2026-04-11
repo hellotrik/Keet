@@ -11,9 +11,7 @@
       "command": "cargo",
       "args": [
         "run",
-        "--release",
-        "--",
-        "${input:keetSourcePath}"
+        "--release"
       ],
       "problemMatcher": [
         "$rustc"

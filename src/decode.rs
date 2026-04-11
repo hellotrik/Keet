@@ -20,23 +20,30 @@ use rtrb::Producer;
 use crate::state::{PlayerState, RING_BUFFER_SIZE};
 use crate::state::RgMode;
 
-fn convert_samples(buf: &AudioBufferRef) -> Vec<f32> {
-    match buf {
-        AudioBufferRef::F32(b) => {
-            let spec = b.planes();
-            let p = spec.planes();
-            let mut out = Vec::with_capacity(b.frames() * p.len());
-            for f in 0..b.frames() {
-                for ch in p { out.push(ch[f]); }
-            }
-            out
+fn interleave_f32_planes(b: &symphonia::core::audio::AudioBuffer<f32>) -> Vec<f32> {
+    let spec = b.planes();
+    let p = spec.planes();
+    let mut out = Vec::with_capacity(b.frames() * p.len());
+    for f in 0..b.frames() {
+        for ch in p {
+            out.push(ch[f]);
         }
+    }
+    out
+}
+
+fn convert_samples(buf: &AudioBufferRef) -> Vec<f32> {
+    // Fast paths for common layouts (FLAC/WAV often emit S16/S32; hi-res FLAC may be S24).
+    match buf {
+        AudioBufferRef::F32(b) => interleave_f32_planes(b),
         AudioBufferRef::S16(b) => {
             let spec = b.planes();
             let p = spec.planes();
             let mut out = Vec::with_capacity(b.frames() * p.len());
             for f in 0..b.frames() {
-                for ch in p { out.push(ch[f] as f32 / 32768.0); }
+                for ch in p {
+                    out.push(ch[f] as f32 / 32768.0);
+                }
             }
             out
         }
@@ -45,11 +52,14 @@ fn convert_samples(buf: &AudioBufferRef) -> Vec<f32> {
             let p = spec.planes();
             let mut out = Vec::with_capacity(b.frames() * p.len());
             for f in 0..b.frames() {
-                for ch in p { out.push(ch[f] as f32 / 2147483648.0); }
+                for ch in p {
+                    out.push(ch[f] as f32 / 2147483648.0);
+                }
             }
             out
         }
-        _ => vec![],
+        // S24 / U8 / F64 / etc.: previously returned empty and skipped packets → clicks & "失真".
+        _ => interleave_f32_planes(&buf.make_equivalent::<f32>()),
     }
 }
 

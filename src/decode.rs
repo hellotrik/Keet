@@ -1,5 +1,4 @@
 use std::fs::File;
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
@@ -19,6 +18,7 @@ use rtrb::Producer;
 
 use crate::state::{PlayerState, RING_BUFFER_SIZE};
 use crate::state::RgMode;
+use crate::track::{MediaKind, Track};
 
 fn interleave_f32_planes(b: &symphonia::core::audio::AudioBuffer<f32>) -> Vec<f32> {
     let spec = b.planes();
@@ -137,7 +137,7 @@ fn compute_rg_gain(mode: RgMode, tags: &RgTags) -> f32 {
 }
 
 pub fn decode_playlist(
-    playlist: &[PathBuf],
+    playlist: &[Track],
     start_index: usize,
     producer: &mut Producer<f32>,
     state: &PlayerState,
@@ -160,7 +160,14 @@ pub fn decode_playlist(
             break;
         }
 
-        let path = &playlist[track_index];
+        // 连续解码会话中遇到视频文件：无 mpv 集成时直接跳到下一曲（与损坏文件类似）。
+        if playlist[track_index].kind == MediaKind::Video {
+            state.signal_next_track(track_index + 1);
+            track_index += 1;
+            continue;
+        }
+
+        let path = &playlist[track_index].path;
 
         // --- Open file and probe format ---
         let file = match File::open(path) {
@@ -648,14 +655,20 @@ pub fn decode_playlist(
         }
 
         // Exclusive mode: check if next track needs a different sample rate
-        if state.exclusive.load(Ordering::Relaxed) && track_index + 1 < playlist.len() {
-            if let Some(next_rate) = crate::audio::probe_sample_rate(&playlist[track_index + 1]) {
-                if next_rate != output_rate {
-                    state.next_track_rate.store(next_rate, Ordering::Relaxed);
-                    state.rate_change_needed.store(true, Ordering::Relaxed);
-                    track_index += 1;
-                    state.producer_track_index.store(track_index, Ordering::Relaxed);
-                    break; // Exit decode_playlist for stream rebuild
+        if state.exclusive.load(Ordering::Relaxed) {
+            let mut ni = track_index + 1;
+            while ni < playlist.len() && playlist[ni].kind == MediaKind::Video {
+                ni += 1;
+            }
+            if ni < playlist.len() {
+                if let Some(next_rate) = crate::audio::probe_sample_rate(&playlist[ni].path) {
+                    if next_rate != output_rate {
+                        state.next_track_rate.store(next_rate, Ordering::Relaxed);
+                        state.rate_change_needed.store(true, Ordering::Relaxed);
+                        track_index += 1;
+                        state.producer_track_index.store(track_index, Ordering::Relaxed);
+                        break; // Exit decode_playlist for stream rebuild
+                    }
                 }
             }
         }

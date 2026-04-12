@@ -4,7 +4,6 @@
 //! **设计**：与 [`crate::idle_ratatui`] 共用同一 [`Terminal`]；子区域用 `Block` / `Paragraph` / `List` 组合。
 //! **输入**：键盘仍由 [`crate::ui::poll_input`] 负责；每帧写入 [`UiState::banner_hotkey_regions`]、[`UiState::transport_click_regions`] 供鼠标命中；每帧可调用 [`UiState::take_status`] 一次以与旧逻辑一致。
 
-use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use ratatui::backend::Backend;
@@ -19,6 +18,7 @@ use crate::state::{
     BannerHotkey, CellRect, InputMode, PlayerState, TransportMouseAction, UiState, ViewMode,
     VizMode, VizStyle, RING_BUFFER_SIZE,
 };
+use crate::track::{MediaKind, Track};
 use crate::ui::format_time;
 use crate::viz::{
     get_viz_line_count, render_spectrum_horizontal, render_spectrum_vertical, render_vu_meter,
@@ -54,6 +54,7 @@ fn ext_note_style(ext: &str) -> Style {
         "flac" | "alac" => Color::Cyan,
         "aiff" | "aif" => Color::Cyan,
         "wav" => Color::Yellow,
+        "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" => Color::Red,
         _ => Color::Green,
     };
     Style::default().fg(c)
@@ -219,7 +220,7 @@ pub fn draw_player<B: Backend>(
     terminal: &mut Terminal<B>,
     state: &PlayerState,
     ui: &mut UiState,
-    playlist: &[PathBuf],
+    playlist: &[Track],
     name: &str,
     track_info: &str,
     ext: &str,
@@ -254,7 +255,7 @@ fn draw_player_frame(
     frame: &mut Frame,
     state: &PlayerState,
     ui: &mut UiState,
-    playlist: &[PathBuf],
+    playlist: &[Track],
     name: &str,
     track_info: &str,
     ext: &str,
@@ -538,7 +539,7 @@ fn draw_player_frame(
 }
 
 /// 与旧 `print_status` 一致：保证列表光标在可视窗口内并钳制 `scroll_offset`。
-fn sync_playlist_scroll(ui: &mut UiState, playlist: &[PathBuf], visible_rows: usize) {
+fn sync_playlist_scroll(ui: &mut UiState, playlist: &[Track], visible_rows: usize) {
     let search_active = matches!(&ui.input_mode, InputMode::Search(q) if !q.is_empty());
     let items: Vec<usize> = if search_active && ui.filtered_indices.is_empty() {
         vec![]
@@ -747,7 +748,7 @@ fn render_playlist_list(
     frame: &mut Frame,
     area: Rect,
     ui: &mut UiState,
-    playlist: &[PathBuf],
+    playlist: &[Track],
     visible_rows: usize,
     term_w: usize,
 ) {
@@ -805,14 +806,19 @@ fn render_playlist_list(
             let list_pos = ui.scroll_offset + row;
             let is_playing = track_idx == ui.current;
             let is_cursor = list_pos == ui.cursor;
-            let fname = ui.metadata_cache.display_name(track_idx, &playlist[track_idx]);
+            let tag = match playlist[track_idx].kind {
+                MediaKind::Video => "[V] ",
+                MediaKind::Audio => "[A] ",
+            };
+            let fname = ui.metadata_cache.display_name(track_idx, &playlist[track_idx].path);
+            let label = format!("{tag}{fname}");
             let marker = if is_playing { "▶" } else { " " };
             let num = format!("{:>4}", track_idx + 1);
             let line = if is_cursor && is_playing {
                 Line::from(vec![
                     Span::raw(format!(" {marker} ")),
                     Span::styled(
-                        format!("{num}  {fname}"),
+                        format!("{num}  {label}"),
                         Style::default()
                             .fg(Color::Green)
                             .bg(Color::DarkGray)
@@ -823,20 +829,20 @@ fn render_playlist_list(
                 Line::from(vec![
                     Span::raw(format!(" {marker} ")),
                     Span::styled(
-                        format!("{num}  {fname}"),
+                        format!("{num}  {label}"),
                         Style::default().bg(Color::DarkGray),
                     ),
                 ])
             } else if is_playing {
                 Line::from(vec![
                     Span::raw(format!(" {marker} ")),
-                    Span::styled(format!("{num}  {fname}"), Style::default().fg(Color::Green)),
+                    Span::styled(format!("{num}  {label}"), Style::default().fg(Color::Green)),
                 ])
             } else {
                 Line::from(vec![
                     Span::raw(format!(" {marker} ")),
                     Span::styled(num, Style::default().fg(Color::DarkGray)),
-                    Span::raw(format!("  {fname}")),
+                    Span::raw(format!("  {label}")),
                 ])
             };
             let _ = term_w;

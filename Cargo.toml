@@ -3,6 +3,11 @@ name = "keet"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# 链接 Homebrew 的 libmpv（见 build.rs 方式 B）；需本机 `brew install mpv`。
+libmpv = []
+
 [dependencies]
 # cpal - Cross-platform audio I/O library
 cpal = "0.17"

@@ -11,6 +11,7 @@ use crossterm::execute;
 use crossterm::terminal;
 
 use crate::state::{BannerHotkey, CellRect, InputMode, PlayerState, TransportMouseAction, UiState, ViewMode};
+use crate::track::Track;
 
 #[cfg(target_os = "macos")]
 fn choose_path_with_dialog_macos() -> Option<PathBuf> {
@@ -112,7 +113,7 @@ fn read_path_from_user(ui: &mut UiState, prompt: &str) -> Option<PathBuf> {
     Some(PathBuf::from(t))
 }
 
-fn switch_source_paths(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBuf>, new_source: PathBuf) {
+fn switch_source_paths(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Track>, new_source: PathBuf) {
     if !new_source.exists() {
         ui.set_status(format!("路径不存在: {}", new_source.display()));
         return;
@@ -120,7 +121,7 @@ fn switch_source_paths(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec
 
     let old_playlist = playlist.clone();
 
-    let mut combined: Vec<PathBuf> = Vec::new();
+    let mut combined: Vec<Track> = Vec::new();
     match crate::playlist::build_playlist(&new_source, false) {
         Ok(tracks) => combined.extend(tracks),
         Err(e) => {
@@ -131,13 +132,13 @@ fn switch_source_paths(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec
 
     // Deduplicate by canonical path (same logic as main.rs)
     let mut seen = std::collections::HashSet::new();
-    combined.retain(|p| {
-        let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+    combined.retain(|t| {
+        let key = std::fs::canonicalize(&t.path).unwrap_or_else(|_| t.path.clone());
         seen.insert(key)
     });
 
     if combined.is_empty() {
-        ui.set_status("目录内没有可播放音频".to_string());
+        ui.set_status("目录内没有可播放的音频或视频".to_string());
         return;
     }
 
@@ -162,7 +163,7 @@ fn switch_source_paths(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec
     ui.metadata_cache.reindex(playlist, &old_playlist);
     ui.metadata_cache.cancel.store(false, Ordering::Relaxed);
     ui.scan_handle = Some(crate::metadata::spawn_metadata_scan(
-        playlist.clone(),
+        playlist.iter().map(|t| t.path.clone()).collect(),
         std::sync::Arc::clone(&ui.metadata_cache),
     ));
 
@@ -176,7 +177,7 @@ pub fn format_time(secs: f64) -> String {
 }
 
 /// 执行 banner 第二行热键对应的动作（键盘与鼠标共用）。
-fn apply_banner_hotkey(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBuf>, hk: BannerHotkey) {
+fn apply_banner_hotkey(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Track>, hk: BannerHotkey) {
     match hk {
         BannerHotkey::Eq => state.cycle_eq(),
         BannerHotkey::Fx => state.cycle_effects(),
@@ -245,7 +246,7 @@ fn apply_banner_hotkey(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec
 }
 
 /// 列表逻辑行 `list_pos` 选中并立即播放（与列表内 Enter 一致）。
-fn playlist_activate_list_pos(state: &PlayerState, ui: &mut UiState, playlist: &[PathBuf], list_pos: usize) {
+fn playlist_activate_list_pos(state: &PlayerState, ui: &mut UiState, playlist: &[Track], list_pos: usize) {
     let max = if ui.filtered_indices.is_empty() {
         playlist.len().saturating_sub(1)
     } else {
@@ -263,7 +264,7 @@ fn playlist_activate_list_pos(state: &PlayerState, ui: &mut UiState, playlist: &
     state.jump_to(target);
 }
 
-pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBuf>) -> bool {
+pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Track>) -> bool {
     // Drain all pending events for responsive input
     while event::poll(Duration::ZERO).unwrap_or(false) {
         let ev = match event::read() { Ok(e) => e, Err(_) => continue };
@@ -477,7 +478,7 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Path
     false
 }
 
-fn handle_text_input(state: &PlayerState, ui: &mut UiState, _playlist: &mut Vec<PathBuf>, key: KeyEvent) -> bool {
+fn handle_text_input(state: &PlayerState, ui: &mut UiState, _playlist: &mut Vec<Track>, key: KeyEvent) -> bool {
     match &mut ui.input_mode {
         InputMode::Search(ref mut query) => {
             match key.code {
@@ -550,7 +551,7 @@ fn handle_text_input(state: &PlayerState, ui: &mut UiState, _playlist: &mut Vec<
     false
 }
 
-fn rebuild_filter(ui: &mut UiState, playlist: &[PathBuf]) {
+fn rebuild_filter(ui: &mut UiState, playlist: &[Track]) {
     let query = match &ui.input_mode {
         InputMode::Search(q) => q.to_lowercase(),
         _ => return,
@@ -566,8 +567,8 @@ fn rebuild_filter(ui: &mut UiState, playlist: &[PathBuf]) {
     let cache = &ui.metadata_cache;
     ui.filtered_indices = playlist.iter()
         .enumerate()
-        .filter(|(i, p)| {
-            cache.search_matches(*i, p, &query)
+        .filter(|(i, t)| {
+            cache.search_matches(*i, &t.path, &query)
         })
         .map(|(i, _)| i)
         .collect();
@@ -585,7 +586,7 @@ fn playlist_cursor_up(ui: &mut UiState) {
     }
 }
 
-fn playlist_cursor_down(ui: &mut UiState, playlist: &[PathBuf]) {
+fn playlist_cursor_down(ui: &mut UiState, playlist: &[Track]) {
     let max = if ui.filtered_indices.is_empty() {
         playlist.len().saturating_sub(1)
     } else {
@@ -596,13 +597,13 @@ fn playlist_cursor_down(ui: &mut UiState, playlist: &[PathBuf]) {
     }
 }
 
-fn ensure_cursor_visible(ui: &mut UiState, _playlist: &[PathBuf]) {
+fn ensure_cursor_visible(ui: &mut UiState, _playlist: &[Track]) {
     if ui.cursor < ui.scroll_offset {
         ui.scroll_offset = ui.cursor;
     }
 }
 
-fn remove_track(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBuf>) {
+fn remove_track(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Track>) {
     if playlist.len() <= 1 {
         ui.set_status("Can't remove the last track".to_string());
         return;
@@ -619,13 +620,13 @@ fn remove_track(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBu
     };
     if track_idx >= playlist.len() { return; }
 
-    let removed_name = ui.metadata_cache.display_name(track_idx, &playlist[track_idx]);
+    let removed_name = ui.metadata_cache.display_name(track_idx, &playlist[track_idx].path);
 
     // Track removed path so repeat cycle doesn't bring it back
-    if let Ok(canon) = std::fs::canonicalize(&playlist[track_idx]) {
+    if let Ok(canon) = std::fs::canonicalize(&playlist[track_idx].path) {
         ui.removed_paths.insert(canon);
     } else {
-        ui.removed_paths.insert(playlist[track_idx].clone());
+        ui.removed_paths.insert(playlist[track_idx].path.clone());
     }
 
     // Remove from playlist and metadata cache
@@ -662,11 +663,11 @@ fn remove_track(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBu
     ui.set_status(format!("Removed: {}", removed_name));
 }
 
-fn rescan(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBuf>) {
+fn rescan(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Track>) {
     use std::sync::atomic::Ordering;
 
     let old_playlist = playlist.clone();
-    let current_track_path = playlist.get(ui.current).cloned();
+    let current_track_path = playlist.get(ui.current).map(|t| t.path.clone());
     let mut total_added = 0usize;
     let mut total_removed = 0usize;
     let mut had_error = false;
@@ -687,14 +688,14 @@ fn rescan(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBuf>) {
 
     // Deduplicate after rescan
     let mut seen = std::collections::HashSet::new();
-    playlist.retain(|p| {
-        let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+    playlist.retain(|t| {
+        let key = std::fs::canonicalize(&t.path).unwrap_or_else(|_| t.path.clone());
         seen.insert(key)
     });
 
     // Find current track's new index
     if let Some(ref track_path) = current_track_path {
-        if let Some(new_idx) = playlist.iter().position(|p| p == track_path) {
+        if let Some(new_idx) = playlist.iter().position(|t| t.path == *track_path) {
             ui.current = new_idx;
         } else {
             ui.current = ui.current.min(playlist.len().saturating_sub(1));
@@ -712,7 +713,7 @@ fn rescan(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<PathBuf>) {
     ui.metadata_cache.reindex(playlist, &old_playlist);
     ui.metadata_cache.cancel.store(false, Ordering::Relaxed);
     ui.scan_handle = Some(crate::metadata::spawn_metadata_scan(
-        playlist.clone(),
+        playlist.iter().map(|t| t.path.clone()).collect(),
         std::sync::Arc::clone(&ui.metadata_cache),
     ));
 

@@ -4,7 +4,6 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 use std::path::PathBuf;
 
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["mp3", "flac", "wav", "ogg", "aac", "m4a", "aiff", "aif"];
 pub const RING_BUFFER_SIZE: usize = 48000 * 2 * 4; // ~4 sec stereo
 pub const VIZ_BUFFER_SIZE: usize = 8192; // Small buffer for viz tap from audio callback
 
@@ -198,6 +197,11 @@ pub struct PlayerState {
 
     // Stream error (device disconnected etc.)
     pub(crate) stream_error: AtomicBool,
+
+    /// 外部 mpv 播放时：为真则 [`Self::time_secs`] / [`Self::total_secs`] 来自下方微秒字段（与音频样本计数互斥）。
+    pub(crate) external_playback_active: AtomicBool,
+    pub(crate) external_time_us: AtomicU64,
+    pub(crate) external_duration_us: AtomicU64,
 }
 
 impl PlayerState {
@@ -254,10 +258,19 @@ impl PlayerState {
             rate_change_needed: AtomicBool::new(false),
             next_track_rate: AtomicU32::new(0),
             stream_error: AtomicBool::new(false),
+            external_playback_active: AtomicBool::new(false),
+            external_time_us: AtomicU64::new(0),
+            external_duration_us: AtomicU64::new(0),
         }
     }
 
     pub fn toggle_pause(&self) { self.paused.fetch_xor(true, Ordering::Relaxed); }
+
+    /// 将暂停状态设为绝对值（用于 mpv IPC 回传或与终端操作对齐）。
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
+    }
+
     pub fn is_paused(&self) -> bool { self.paused.load(Ordering::Relaxed) }
     pub fn quit(&self) { self.quit.store(true, Ordering::Relaxed); }
     pub fn should_quit(&self) -> bool { self.quit.load(Ordering::Relaxed) }
@@ -289,15 +302,39 @@ impl PlayerState {
     }
 
     pub fn time_secs(&self) -> f64 {
-        let s = self.samples_played.load(Ordering::Relaxed) as f64;
-        let r = self.output_rate.load(Ordering::Relaxed) as f64;
-        if r > 0.0 { s / r } else { 0.0 }
+        if self.external_playback_active.load(Ordering::Relaxed) {
+            self.external_time_us.load(Ordering::Relaxed) as f64 / 1_000_000.0
+        } else {
+            let s = self.samples_played.load(Ordering::Relaxed) as f64;
+            let r = self.output_rate.load(Ordering::Relaxed) as f64;
+            if r > 0.0 { s / r } else { 0.0 }
+        }
     }
 
     pub fn total_secs(&self) -> f64 {
-        let s = self.total_samples.load(Ordering::Relaxed) as f64;
-        let r = self.sample_rate.load(Ordering::Relaxed) as f64;
-        if r > 0.0 { s / r } else { 0.0 }
+        if self.external_playback_active.load(Ordering::Relaxed) {
+            self.external_duration_us.load(Ordering::Relaxed) as f64 / 1_000_000.0
+        } else {
+            let s = self.total_samples.load(Ordering::Relaxed) as f64;
+            let r = self.sample_rate.load(Ordering::Relaxed) as f64;
+            if r > 0.0 { s / r } else { 0.0 }
+        }
+    }
+
+    /// 启用外部播放时间轴（mpv）；与 [`Self::clear_external_playback`] 成对使用。
+    pub fn set_external_playback_active(&self, active: bool) {
+        self.external_playback_active.store(active, Ordering::Relaxed);
+    }
+
+    pub fn set_external_time_duration(&self, pos_secs: f64, dur_secs: f64) {
+        self.external_time_us.store((pos_secs * 1_000_000.0) as u64, Ordering::Relaxed);
+        self.external_duration_us.store((dur_secs * 1_000_000.0) as u64, Ordering::Relaxed);
+    }
+
+    pub fn clear_external_playback(&self) {
+        self.external_playback_active.store(false, Ordering::Relaxed);
+        self.external_time_us.store(0, Ordering::Relaxed);
+        self.external_duration_us.store(0, Ordering::Relaxed);
     }
 
     pub fn viz_mode(&self) -> VizMode {

@@ -8,6 +8,9 @@
 // Controls: Space=Pause, ↑↓=Tracks, ←→=Seek ±10s, V=Viz, +/-=Vol, Q=Quit
 
 mod state;
+mod track;
+mod mpv_ipc;
+mod video_mpv;
 mod viz;
 mod audio;
 mod decode;
@@ -43,7 +46,8 @@ use state::{PlayerState, UiState, RgMode, VizMode, RING_BUFFER_SIZE, VIZ_BUFFER_
 use viz::{StatsMonitor, VizAnalyser};
 use audio::{build_stream, set_output_sample_rate, probe_sample_rate, fix_bluetooth_sample_rate};
 use decode::decode_playlist;
-use playlist::{build_playlist, shuffle_list};
+use playlist::{build_playlist, shuffle_tracks};
+use track::MediaKind;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use ui::{poll_input, format_time};
@@ -299,7 +303,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("      --list-devices     List available output devices and exit");
         println!("  -h, --help             Show this help");
         println!();
-        println!("\x1B[1mFORMATS\x1B[0m  MP3, FLAC, WAV, OGG, AAC/M4A, ALAC, AIFF");
+        println!("\x1B[1mFORMATS\x1B[0m  Audio: MP3, FLAC, WAV, OGG, AAC/M4A, ALAC, AIFF");
+        println!("            Video: MP4, MKV, WebM, MOV, AVI, M4V (external mpv window)");
         println!();
         println!("\x1B[1mKEYBOARD\x1B[0m");
         println!("  Space        Pause / resume");
@@ -426,15 +431,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if combined.is_empty() {
-            return Err("No audio files found".into());
+            return Err("No audio or video files found".into());
         }
         // Deduplicate by canonical path
         let mut seen = std::collections::HashSet::new();
-        combined.retain(|p| {
-            let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        combined.retain(|t| {
+            let key = std::fs::canonicalize(&t.path).unwrap_or_else(|_| t.path.clone());
             seen.insert(key)
         });
-        if shuffle { shuffle_list(&mut combined); }
+        if shuffle { shuffle_tracks(&mut combined); }
         combined
     };
     let state = Arc::new(PlayerState::new());
@@ -638,13 +643,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui.terminal_resized = true;
     }
     ui.scan_handle = Some(metadata::spawn_metadata_scan(
-        playlist.clone(),
+        playlist.iter().map(|t| t.path.clone()).collect(),
         std::sync::Arc::clone(&metadata_cache),
     ));
 
     // Set starting track for resume
     if let Some(ref rs) = resume_state_loaded {
-        if let Some(idx) = playlist.iter().position(|p| p.to_string_lossy() == rs.track_path.as_str()) {
+        if let Some(idx) = playlist.iter().position(|t| t.path.to_string_lossy().as_ref() == rs.track_path.as_str()) {
             ui.current = idx;
         }
     }
@@ -660,7 +665,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Probe first track's sample rate to set output rate
-    let source_rate = probe_sample_rate(&playlist[ui.current]).unwrap_or(44100);
+    let source_rate = if playlist[ui.current].kind == MediaKind::Audio {
+        probe_sample_rate(&playlist[ui.current].path).unwrap_or(44100)
+    } else {
+        playlist
+            .iter()
+            .find(|t| t.kind == MediaKind::Audio)
+            .and_then(|t| probe_sample_rate(&t.path))
+            .unwrap_or(44100)
+    };
     let persistent_output_rate = set_output_sample_rate(source_rate, current_output_rate, &device);
     let actual_device_rate = match device.default_output_config() {
         Ok(config) => config.sample_rate(),
@@ -784,31 +797,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if !combined.is_empty() {
                         let mut seen = std::collections::HashSet::new();
-                        combined.retain(|p| {
-                            let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                        combined.retain(|t| {
+                            let key = std::fs::canonicalize(&t.path).unwrap_or_else(|_| t.path.clone());
                             seen.insert(key)
                         });
                         // Filter out tracks the user removed during this session
                         if !ui.removed_paths.is_empty() {
-                            combined.retain(|p| {
-                                let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                            combined.retain(|t| {
+                                let key = std::fs::canonicalize(&t.path).unwrap_or_else(|_| t.path.clone());
                                 !ui.removed_paths.contains(&key)
                             });
                         }
-                        if ui.shuffle { shuffle_list(&mut combined); }
+                        if ui.shuffle { shuffle_tracks(&mut combined); }
                         playlist = combined;
                         state.total_tracks.store(playlist.len(), Ordering::Relaxed);
                     }
                 } else {
                     // Non-directory sources: filter removed tracks from existing playlist
                     if !ui.removed_paths.is_empty() {
-                        playlist.retain(|p| {
-                            let key = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                        playlist.retain(|t| {
+                            let key = std::fs::canonicalize(&t.path).unwrap_or_else(|_| t.path.clone());
                             !ui.removed_paths.contains(&key)
                         });
                         state.total_tracks.store(playlist.len(), Ordering::Relaxed);
                     }
-                    if ui.shuffle { shuffle_list(&mut playlist); }
+                    if ui.shuffle { shuffle_tracks(&mut playlist); }
                 }
 
                 // Reindex metadata cache
@@ -819,7 +832,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.metadata_cache.reindex(&playlist, &old_playlist);
                 ui.metadata_cache.cancel.store(false, Ordering::Relaxed);
                 ui.scan_handle = Some(metadata::spawn_metadata_scan(
-                    playlist.clone(),
+                    playlist.iter().map(|t| t.path.clone()).collect(),
                     std::sync::Arc::clone(&ui.metadata_cache),
                 ));
 
@@ -830,7 +843,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Reset state for new producer
+        // 视频：外部 mpv 窗口，不进入 symphonia producer
+        if playlist[ui.current].kind == MediaKind::Video {
+            state.clear_external_playback();
+            state.current_track.store(ui.current, Ordering::Relaxed);
+            if let Ok(mut err) = state.decode_error.lock() {
+                *err = None;
+            }
+            let cur_track = playlist[ui.current].path.clone();
+            let track_path = cur_track.as_path();
+            let track_ext = track_path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let filename = ui.metadata_cache.display_name(ui.current, track_path);
+            let quit_app = video_mpv::run_mpv_video_session(
+                track_path,
+                &filename,
+                &track_ext,
+                &state,
+                &mut ui,
+                &mut playlist,
+                &mut tui_terminal,
+                eq_presets.as_ref(),
+                fx_presets.as_ref(),
+                cf_presets.as_ref(),
+                &device_arg,
+                &mut stats,
+                &mut media_controls,
+            );
+            if quit_app {
+                print!("\x1B[?25h");
+                print!("\x1B[J");
+                io::stdout().flush().ok();
+                save_state(&build_resume_state(
+                    &ui,
+                    &playlist,
+                    &state,
+                    eq_presets.as_ref(),
+                    fx_presets.as_ref(),
+                    cf_presets.as_ref(),
+                    &device_arg,
+                ));
+                if let Some(id) = hog_device_id {
+                    audio::release_exclusive_mode(id);
+                }
+                let _ = execute!(io::stdout(), DisableMouseCapture);
+                let _ = terminal::disable_raw_mode();
+                return Ok(());
+            }
+            if state.should_quit() {
+                break 'playlist;
+            }
+            continue 'playlist;
+        }
+
+        // Reset state for new producer（清除 mpv 外部时间轴）
+        state.clear_external_playback();
         state.current_track.store(ui.current, Ordering::Relaxed);
         state.producer_done.store(false, Ordering::Relaxed);
         state.track_info_ready.store(false, Ordering::Relaxed);
@@ -839,7 +908,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.buffer_level.store(0, Ordering::Relaxed);
         if let Ok(mut err) = state.decode_error.lock() { *err = None; }
 
-        let cur_track = playlist[ui.current].clone();
+        let cur_track = playlist[ui.current].path.clone();
         let track_path = cur_track.as_path();
         // 不在主线程做 symphonia 全量扫标签（大文件会卡 UI）；标题由后台 metadata 扫完后在缓存中更新。
         let mut track_ext = track_path
@@ -933,7 +1002,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Resume: seek to saved position (only on first track after resume)
-        if resume_position > 0 {
+        if resume_position > 0
+            && playlist
+                .get(ui.current)
+                .map(|t| t.kind == MediaKind::Audio)
+                .unwrap_or(false)
+        {
             state.seek(resume_position);
             resume_position = 0;
         }
@@ -1022,14 +1096,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Update display info for new track
                     let new_path = &playlist[ui.current];
-                    filename = ui.metadata_cache.display_name(ui.current, new_path);
-                    track_ext = new_path.extension()
+                    filename = ui.metadata_cache.display_name(ui.current, &new_path.path);
+                    track_ext = new_path.path
+                        .extension()
                         .map(|e| e.to_string_lossy().to_lowercase())
                         .unwrap_or_default();
 
                     let dur = { let t = state.total_secs(); if t > 0.0 { Some(t as u32) } else { None } };
                     spawn_lyrics_background(
-                        new_path.to_path_buf(),
+                        new_path.path.clone(),
                         ui.current,
                         Arc::clone(&ui.metadata_cache),
                         dur,

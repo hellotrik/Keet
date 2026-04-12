@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+
+use crate::track::Track;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -91,17 +93,17 @@ impl MetadataCache {
         }
     }
 
-    pub fn reindex(&self, new_playlist: &[PathBuf], old_playlist: &[PathBuf]) {
+    pub fn reindex(&self, new_playlist: &[Track], old_playlist: &[Track]) {
         let mut entries = self.entries.lock().unwrap();
         let mut map: HashMap<PathBuf, CachedMeta> = HashMap::new();
-        for (i, path) in old_playlist.iter().enumerate() {
+        for (i, t) in old_playlist.iter().enumerate() {
             if let Some(meta) = entries.get_mut(i).and_then(|e| e.take()) {
-                map.insert(path.clone(), meta);
+                map.insert(t.path.clone(), meta);
             }
         }
         let new_entries: Vec<Option<CachedMeta>> = new_playlist
             .iter()
-            .map(|p| map.remove(p))
+            .map(|t| map.remove(&t.path))
             .collect();
         *entries = new_entries;
     }

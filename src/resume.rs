@@ -8,6 +8,7 @@ use crate::effects::EffectsPreset;
 use crate::eq::EqPreset;
 use crate::playlist::keet_config_dir;
 use crate::state::{PlayerState, UiState};
+use crate::track::Track;
 
 #[derive(Serialize, Deserialize)]
 pub struct ResumeState {
@@ -55,7 +56,7 @@ pub fn load_state() -> Option<ResumeState> {
 /// 从当前 UI / 播放状态构造可序列化的断点快照（供 `save_state` 写入磁盘）。
 pub fn build_resume_state(
     ui: &UiState,
-    playlist: &[PathBuf],
+    playlist: &[Track],
     player_state: &PlayerState,
     eq_presets: &[EqPreset],
     fx_presets: &[EffectsPreset],
@@ -70,7 +71,7 @@ pub fn build_resume_state(
             .collect(),
         track_path: playlist
             .get(ui.current)
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|t| t.path.to_string_lossy().into_owned())
             .unwrap_or_default(),
         position_secs: player_state.time_secs(),
         shuffle: ui.shuffle,

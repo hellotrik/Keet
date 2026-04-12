@@ -5,7 +5,6 @@
 //! **输入**：复用 [`crate::ui::poll_input`]，保证 O / P / G / T / Q 等与主界面一致。
 //! **注意**：工程将 Ratatui 设为 0.30 + `crossterm_0_29`，与 `Cargo.toml` 中的 `crossterm = "0.29"` 对齐；raw 模式与事件仍由 `main` 统一管理，此处只负责帧绘制。
 
-use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
@@ -22,6 +21,7 @@ use crate::effects::EffectsPreset;
 use crate::eq::EqPreset;
 use crate::resume::{build_resume_state, save_state};
 use crate::state::{PlayerState, UiState};
+use crate::track::Track;
 use crate::ui::poll_input;
 
 /// 绘制一帧空闲界面（标题区、操作说明、当前预设摘要）。
@@ -106,7 +106,7 @@ pub fn run_session_idle<B: Backend>(
     terminal: &mut Terminal<B>,
     state: &PlayerState,
     ui: &mut UiState,
-    playlist: &mut Vec<PathBuf>,
+    playlist: &mut Vec<Track>,
     eq_presets: &[EqPreset],
     fx_presets: &[EffectsPreset],
     cf_presets: &[CrossfeedPreset],

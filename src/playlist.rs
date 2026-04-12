@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::state::SUPPORTED_EXTENSIONS;
+use crate::track::{is_supported_media_extension, Track};
 
-pub fn shuffle_list(list: &mut [PathBuf]) {
+pub fn shuffle_tracks(list: &mut [Track]) {
     let mut rng = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -14,14 +14,14 @@ pub fn shuffle_list(list: &mut [PathBuf]) {
     }
 }
 
-pub fn build_playlist(path: &Path, shuffle: bool) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+pub fn build_playlist(path: &Path, shuffle: bool) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
     // Check for M3U playlist file
     if let Some(ext) = path.extension() {
         let ext_lower = ext.to_string_lossy().to_lowercase();
         if ext_lower == "m3u" || ext_lower == "m3u8" {
             let mut list = parse_m3u(path)?;
             if shuffle {
-                shuffle_list(&mut list);
+                shuffle_tracks(&mut list);
             }
             return Ok(list);
         }
@@ -30,9 +30,9 @@ pub fn build_playlist(path: &Path, shuffle: bool) -> Result<Vec<PathBuf>, Box<dy
     let mut list = Vec::new();
 
     if path.is_file() {
-        list.push(path.to_path_buf());
+        list.push(Track::new(path.to_path_buf()));
     } else if path.is_dir() {
-        fn scan_dir(dir: &Path, list: &mut Vec<PathBuf>) {
+        fn scan_dir(dir: &Path, list: &mut Vec<Track>) {
             if let Ok(entries) = fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let p = entry.path();
@@ -40,8 +40,8 @@ pub fn build_playlist(path: &Path, shuffle: bool) -> Result<Vec<PathBuf>, Box<dy
                         scan_dir(&p, list);
                     } else if p.is_file() {
                         if let Some(ext) = p.extension() {
-                            if SUPPORTED_EXTENSIONS.contains(&ext.to_string_lossy().to_lowercase().as_str()) {
-                                list.push(p);
+                            if is_supported_media_extension(&ext.to_string_lossy()) {
+                                list.push(Track::new(p));
                             }
                         }
                     }
@@ -49,15 +49,15 @@ pub fn build_playlist(path: &Path, shuffle: bool) -> Result<Vec<PathBuf>, Box<dy
             }
         }
         scan_dir(path, &mut list);
-        list.sort();
+        list.sort_by(|a, b| a.path.cmp(&b.path));
 
         if shuffle {
-            shuffle_list(&mut list);
+            shuffle_tracks(&mut list);
         }
     }
 
     if list.is_empty() {
-        return Err("No audio files found".into());
+        return Err("No audio or video files found".into());
     }
     Ok(list)
 }
@@ -71,8 +71,8 @@ pub fn keet_config_dir() -> Option<PathBuf> {
     }
 }
 
-/// Parse an M3U/M3U8 playlist file into a list of audio file paths.
-pub fn parse_m3u(path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+/// Parse an M3U/M3U8 playlist file into a list of tracks.
+pub fn parse_m3u(path: &Path) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;
     let parent = path.parent().unwrap_or(Path::new("."));
     let mut list = Vec::new();
@@ -89,15 +89,15 @@ pub fn parse_m3u(path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>
         };
         if track_path.is_file() {
             if let Some(ext) = track_path.extension() {
-                if SUPPORTED_EXTENSIONS.contains(&ext.to_string_lossy().to_lowercase().as_str()) {
-                    list.push(track_path);
+                if is_supported_media_extension(&ext.to_string_lossy()) {
+                    list.push(Track::new(track_path));
                 }
             }
         }
     }
 
     if list.is_empty() {
-        return Err("No audio files found in playlist".into());
+        return Err("No audio or video files found in playlist".into());
     }
     Ok(list)
 }
@@ -105,7 +105,7 @@ pub fn parse_m3u(path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>
 /// Save a playlist as an M3U file.
 /// If `name` contains a path separator, treat it as a full path.
 /// Otherwise, save to ~/.config/keet/playlists/<name>.m3u.
-pub fn save_m3u(playlist: &[PathBuf], name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+pub fn save_m3u(playlist: &[Track], name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = if name.contains('/') || name.contains('\\') {
         let p = PathBuf::from(name);
         if !p.to_string_lossy().ends_with(".m3u") && !p.to_string_lossy().ends_with(".m3u8") {
@@ -133,7 +133,7 @@ pub fn save_m3u(playlist: &[PathBuf], name: &str) -> Result<PathBuf, Box<dyn std
 
     let mut content = String::from("#EXTM3U\n");
     for track in playlist {
-        content.push_str(&track.to_string_lossy());
+        content.push_str(&track.path.to_string_lossy());
         content.push('\n');
     }
     fs::write(&path, &content)?;
@@ -144,10 +144,11 @@ pub fn save_m3u(playlist: &[PathBuf], name: &str) -> Result<PathBuf, Box<dyn std
 /// Returns (added_count, removed_count).
 pub fn rescan_playlist(
     source_path: &Path,
-    playlist: &mut Vec<PathBuf>,
+    playlist: &mut Vec<Track>,
     current_track_path: Option<&Path>,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
-    let fresh = if source_path.extension()
+    let fresh = if source_path
+        .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
         .map(|e| e == "m3u" || e == "m3u8")
         .unwrap_or(false)
@@ -157,12 +158,15 @@ pub fn rescan_playlist(
         build_playlist(source_path, false)?
     };
 
-    let current_set: std::collections::HashSet<&std::path::Path> = playlist.iter().map(|p| p.as_path()).collect();
-    let fresh_set: std::collections::HashSet<&std::path::Path> = fresh.iter().map(|p| p.as_path()).collect();
+    let current_set: std::collections::HashSet<&std::path::Path> =
+        playlist.iter().map(|t| t.path.as_path()).collect();
+    let fresh_set: std::collections::HashSet<&std::path::Path> =
+        fresh.iter().map(|t| t.path.as_path()).collect();
 
     // Find new files (in fresh but not in current)
-    let mut added: Vec<PathBuf> = fresh.iter()
-        .filter(|p| !current_set.contains(p.as_path()))
+    let mut added: Vec<Track> = fresh
+        .iter()
+        .filter(|t| !current_set.contains(t.path.as_path()))
         .cloned()
         .collect();
     let added_count = added.len();
@@ -171,9 +175,9 @@ pub fn rescan_playlist(
     let removed_count = current_set.difference(&fresh_set).count();
 
     // Remove missing files (preserve order, skip currently playing track)
-    playlist.retain(|p| {
-        if !fresh_set.contains(p.as_path()) {
-            current_track_path.map(|c| c == p.as_path()).unwrap_or(false)
+    playlist.retain(|t| {
+        if !fresh_set.contains(t.path.as_path()) {
+            current_track_path.map(|c| c == t.path.as_path()).unwrap_or(false)
         } else {
             true
         }

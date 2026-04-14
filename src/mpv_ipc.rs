@@ -53,6 +53,7 @@ mod unix {
                     "--no-terminal",
                     "--force-window=yes",
                     "--keep-open=no",
+                    "--geometry=+0+0",
                 ])
                 .arg(path)
                 .stdin(Stdio::null())

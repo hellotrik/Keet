@@ -258,6 +258,7 @@ fn run_without_ipc<B: Backend>(
             "--no-terminal",
             "--force-window=yes",
             "--keep-open=no",
+            "--geometry=+0+0",
         ])
         .arg(path)
         .stdin(Stdio::null())

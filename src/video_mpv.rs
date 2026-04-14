@@ -147,11 +147,30 @@ fn run_with_ipc<B: Backend>(
     let mut last_vol = vol0;
     let mut last_paused = state.is_paused();
     let mut eof_reached = false;
+    let mut zoom: f64 = 0.0;
+    let mut pan_x: f64 = 0.0;
+    let mut pan_y: f64 = 0.0;
+    let mut zoom_step: f64 = 0.1;
+    let mut pan_step: f64 = 0.05;
+
+    const ZOOM_MIN_STEP: f64 = 0.05;
+    const ZOOM_MAX_STEP: f64 = 0.25;
+    const PAN_MIN_STEP: f64 = 0.01;
+    const PAN_MAX_STEP: f64 = 0.2;
+    const ZOOM_MAX: f64 = 2.0;
+    const PAN_LIMIT: f64 = 1.0;
+
+    let push_view_to_mpv = |cmd_tx: &mpsc::Sender<MpvCmd>, zoom: f64, pan_x: f64, pan_y: f64| {
+        let _ = cmd_tx.send(MpvCmd::SetPropertyF64 { name: "video-zoom", value: zoom });
+        let _ = cmd_tx.send(MpvCmd::SetPropertyF64 { name: "video-pan-x", value: pan_x });
+        let _ = cmd_tx.send(MpvCmd::SetPropertyF64 { name: "video-pan-y", value: pan_y });
+    };
 
     enum MpvCmd {
         SetPause(bool),
         SetVolume(u32),
         SeekRelative(i64),
+        SetPropertyF64 { name: &'static str, value: f64 },
         LoadReplace { target: usize, path: std::path::PathBuf },
         Kill,
     }
@@ -224,6 +243,9 @@ fn run_with_ipc<B: Backend>(
                         if delta != 0 {
                             let _ = ipc.seek_relative(delta);
                         }
+                    }
+                    MpvCmd::SetPropertyF64 { name, value } => {
+                        let _ = ipc.set_property_f64(name, value);
                     }
                     MpvCmd::LoadReplace { target, path } => {
                         let ok = ipc.loadfile_replace(&path).is_ok();
@@ -354,6 +376,41 @@ fn run_with_ipc<B: Backend>(
             let _ = cmd_tx.send(MpvCmd::SeekRelative(sk));
         }
 
+        // 视频视图控制（来自输入层的请求）
+        if state.take_video_view_reset() {
+            zoom = 0.0;
+            pan_x = 0.0;
+            pan_y = 0.0;
+            zoom_step = 0.1;
+            pan_step = 0.05;
+            push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
+            ui.set_status(format!("Video view reset • zoom={:.2} step={:.2} pan_step={:.2}", zoom, zoom_step, pan_step));
+        }
+
+        let step_adj = state.take_video_step_adjust();
+        if step_adj != 0 {
+            // Adjust both zoom_step and pan_step proportionally (bounded).
+            let dir = if step_adj > 0 { 1.0 } else { -1.0 };
+            zoom_step = (zoom_step + dir * 0.01).clamp(ZOOM_MIN_STEP, ZOOM_MAX_STEP);
+            pan_step = (pan_step + dir * 0.01).clamp(PAN_MIN_STEP, PAN_MAX_STEP);
+            ui.set_status(format!("Step • zoom_step={:.2} pan_step={:.2}", zoom_step, pan_step));
+        }
+
+        let z_steps = state.take_video_zoom_steps();
+        if z_steps != 0 {
+            zoom = (zoom + (z_steps as f64) * zoom_step).clamp(0.0, ZOOM_MAX);
+            push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
+            ui.set_status(format!("Zoom • {:.2} (step {:.2})", zoom, zoom_step));
+        }
+
+        let (dx_steps, dy_steps) = state.take_video_pan_steps();
+        if dx_steps != 0 || dy_steps != 0 {
+            pan_x = (pan_x + (dx_steps as f64) * pan_step).clamp(-PAN_LIMIT, PAN_LIMIT);
+            pan_y = (pan_y + (dy_steps as f64) * pan_step).clamp(-PAN_LIMIT, PAN_LIMIT);
+            push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
+            ui.set_status(format!("Pan • x={:.2} y={:.2} (step {:.2})", pan_x, pan_y, pan_step));
+        }
+
         if let Some(j) = state.take_jump() {
             let target = j.min(playlist.len().saturating_sub(1));
             if let Some((f, e)) =
@@ -363,6 +420,8 @@ fn run_with_ipc<B: Backend>(
                 cur_ext = e;
                 eof_reached = false;
                 pending_load_target = Some(target);
+                // Keep view state across videos; re-apply after load to avoid mpv resetting filters.
+                push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
                 continue;
             }
             let _ = cmd_tx.send(MpvCmd::Kill);
@@ -381,6 +440,7 @@ fn run_with_ipc<B: Backend>(
                 cur_ext = e;
                 eof_reached = false;
                 pending_load_target = Some(target);
+                push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
                 continue;
             }
             let _ = cmd_tx.send(MpvCmd::Kill);
@@ -399,6 +459,7 @@ fn run_with_ipc<B: Backend>(
                 cur_ext = e;
                 eof_reached = false;
                 pending_load_target = Some(target);
+                push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
                 continue;
             }
             let _ = cmd_tx.send(MpvCmd::Kill);
@@ -419,6 +480,7 @@ fn run_with_ipc<B: Backend>(
                 cur_ext = e;
                 eof_reached = false;
                 pending_load_target = Some(target);
+                push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
                 continue;
             }
             let _ = cmd_tx.send(MpvCmd::Kill);

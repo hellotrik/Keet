@@ -224,6 +224,22 @@ mod unix {
             self.drain_until_id(id)
         }
 
+        pub fn set_property_f64(&mut self, name: &str, value: f64) -> io::Result<()> {
+            let id = self.next_id();
+            let name_json = serde_json::to_string(name)
+                .unwrap_or_else(|_| "\"\"".to_string());
+            // mpv IPC expects the property name as a string and the value as JSON literal.
+            writeln!(
+                self.writer,
+                "{{\"command\":[\"set_property\",{},{}],\"request_id\":{}}}",
+                name_json,
+                value,
+                id
+            )?;
+            self.writer.flush()?;
+            self.drain_until_id(id)
+        }
+
         pub fn seek_relative(&mut self, delta_secs: i64) -> io::Result<()> {
             let id = self.next_id();
             let d = delta_secs as f64;

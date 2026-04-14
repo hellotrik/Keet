@@ -444,7 +444,12 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Trac
                 KeyEvent { code: KeyCode::Char('l'), .. } => apply_banner_hotkey(state, ui, playlist, BannerHotkey::List),
                 KeyEvent { code: KeyCode::Char('y'), .. } => apply_banner_hotkey(state, ui, playlist, BannerHotkey::Lyrics),
                 KeyEvent { code: KeyCode::Char('s'), .. } => {
-                    ui.input_mode = InputMode::SavePlaylist(String::new());
+                    // 视频（mpv 外部播放）模式下，S 键用于视图平移（WASD）。
+                    if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
+                        state.request_video_pan_steps(0, 1);
+                    } else {
+                        ui.input_mode = InputMode::SavePlaylist(String::new());
+                    }
                 }
                 KeyEvent { code: KeyCode::Char('r'), .. } => {
                     rescan(state, ui, playlist);
@@ -470,8 +475,50 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Trac
                     apply_banner_hotkey(state, ui, playlist, BannerHotkey::Crossfeed);
                 }
                 KeyEvent { code: KeyCode::Char('i'), .. } => apply_banner_hotkey(state, ui, playlist, BannerHotkey::Info),
-                KeyEvent { code: KeyCode::Char('['), .. } => state.balance_left(),
-                KeyEvent { code: KeyCode::Char(']'), .. } => state.balance_right(),
+                KeyEvent { code: KeyCode::Char('['), .. } => {
+                    if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
+                        state.request_video_step_adjust(-1);
+                    } else {
+                        state.balance_left()
+                    }
+                }
+                KeyEvent { code: KeyCode::Char(']'), .. } => {
+                    if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
+                        state.request_video_step_adjust(1);
+                    } else {
+                        state.balance_right()
+                    }
+                }
+                KeyEvent { code: KeyCode::Char('w'), .. } => {
+                    if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
+                        state.request_video_pan_steps(0, -1);
+                    }
+                }
+                KeyEvent { code: KeyCode::Char('a'), .. } => {
+                    if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
+                        state.request_video_pan_steps(-1, 0);
+                    }
+                }
+                KeyEvent { code: KeyCode::Char('d'), .. } => {
+                    if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
+                        state.request_video_pan_steps(1, 0);
+                    }
+                }
+                KeyEvent { code: KeyCode::Char('z'), .. } => {
+                    if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
+                        state.request_video_zoom_steps(1);
+                    }
+                }
+                KeyEvent { code: KeyCode::Char('Z'), .. } => {
+                    if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
+                        state.request_video_zoom_steps(-1);
+                    }
+                }
+                KeyEvent { code: KeyCode::Char('0'), .. } => {
+                    if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
+                        state.request_video_view_reset();
+                    }
+                }
                 _ => {}
             }
     }

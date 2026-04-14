@@ -202,6 +202,14 @@ pub struct PlayerState {
     pub(crate) external_playback_active: AtomicBool,
     pub(crate) external_time_us: AtomicU64,
     pub(crate) external_duration_us: AtomicU64,
+
+    // --- Video view controls (mpv IPC session) ---
+    // These are requests coming from the input layer; the mpv control loop consumes them.
+    pub(crate) video_zoom_steps: AtomicI32,
+    pub(crate) video_pan_x_steps: AtomicI32,
+    pub(crate) video_pan_y_steps: AtomicI32,
+    pub(crate) video_step_adjust: AtomicI32,
+    pub(crate) video_view_reset: AtomicBool,
 }
 
 impl PlayerState {
@@ -261,6 +269,11 @@ impl PlayerState {
             external_playback_active: AtomicBool::new(false),
             external_time_us: AtomicU64::new(0),
             external_duration_us: AtomicU64::new(0),
+            video_zoom_steps: AtomicI32::new(0),
+            video_pan_x_steps: AtomicI32::new(0),
+            video_pan_y_steps: AtomicI32::new(0),
+            video_step_adjust: AtomicI32::new(0),
+            video_view_reset: AtomicBool::new(false),
         }
     }
 
@@ -335,6 +348,49 @@ impl PlayerState {
         self.external_playback_active.store(false, Ordering::Relaxed);
         self.external_time_us.store(0, Ordering::Relaxed);
         self.external_duration_us.store(0, Ordering::Relaxed);
+    }
+
+    pub fn request_video_zoom_steps(&self, delta_steps: i32) {
+        if delta_steps != 0 {
+            let _ = self.video_zoom_steps.fetch_add(delta_steps, Ordering::Relaxed);
+        }
+    }
+
+    pub fn take_video_zoom_steps(&self) -> i32 {
+        self.video_zoom_steps.swap(0, Ordering::Relaxed)
+    }
+
+    pub fn request_video_pan_steps(&self, dx_steps: i32, dy_steps: i32) {
+        if dx_steps != 0 {
+            let _ = self.video_pan_x_steps.fetch_add(dx_steps, Ordering::Relaxed);
+        }
+        if dy_steps != 0 {
+            let _ = self.video_pan_y_steps.fetch_add(dy_steps, Ordering::Relaxed);
+        }
+    }
+
+    pub fn take_video_pan_steps(&self) -> (i32, i32) {
+        let dx = self.video_pan_x_steps.swap(0, Ordering::Relaxed);
+        let dy = self.video_pan_y_steps.swap(0, Ordering::Relaxed);
+        (dx, dy)
+    }
+
+    pub fn request_video_step_adjust(&self, delta: i32) {
+        if delta != 0 {
+            let _ = self.video_step_adjust.fetch_add(delta, Ordering::Relaxed);
+        }
+    }
+
+    pub fn take_video_step_adjust(&self) -> i32 {
+        self.video_step_adjust.swap(0, Ordering::Relaxed)
+    }
+
+    pub fn request_video_view_reset(&self) {
+        self.video_view_reset.store(true, Ordering::Relaxed);
+    }
+
+    pub fn take_video_view_reset(&self) -> bool {
+        self.video_view_reset.swap(false, Ordering::Relaxed)
     }
 
     pub fn viz_mode(&self) -> VizMode {

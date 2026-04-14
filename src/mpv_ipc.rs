@@ -16,6 +16,8 @@ mod unix {
         pub time_pos: f64,
         pub duration: f64,
         pub paused: bool,
+        /// 为 true 表示当前文件已播放到 EOF，mpv 处于 idle（配合 --keep-open=yes 可用于复用窗口切下一个视频）。
+        pub eof_reached: bool,
     }
 
     pub struct MpvIpc {
@@ -52,7 +54,7 @@ mod unix {
                     "--really-quiet",
                     "--no-terminal",
                     "--force-window=yes",
-                    "--keep-open=no",
+                    "--keep-open=yes",
                     "--geometry=+0+0",
                 ])
                 .arg(path)
@@ -102,6 +104,7 @@ mod unix {
             let id_t = self.next_id();
             let id_d = self.next_id();
             let id_p = self.next_id();
+            let id_e = self.next_id();
 
             writeln!(
                 self.writer,
@@ -118,15 +121,21 @@ mod unix {
                 "{{\"command\":[\"get_property\",\"pause\"],\"request_id\":{}}}",
                 id_p
             )?;
+            writeln!(
+                self.writer,
+                "{{\"command\":[\"get_property\",\"eof-reached\"],\"request_id\":{}}}",
+                id_e
+            )?;
             self.writer.flush()?;
 
             let mut t = None::<f64>;
             let mut d = None::<f64>;
             let mut p = None::<bool>;
+            let mut e = None::<bool>;
             let mut line = String::new();
             let mut guard = 0usize;
 
-            while t.is_none() || d.is_none() || p.is_none() {
+            while t.is_none() || d.is_none() || p.is_none() || e.is_none() {
                 guard += 1;
                 if guard > 4096 {
                     return Err(io::Error::new(
@@ -159,6 +168,10 @@ mod unix {
                     if v.get("error").and_then(|e| e.as_str()) == Some("success") {
                         p = v.get("data").and_then(|x| x.as_bool());
                     }
+                } else if rid_match(&v, id_e) {
+                    if v.get("error").and_then(|e| e.as_str()) == Some("success") {
+                        e = v.get("data").and_then(|x| x.as_bool());
+                    }
                 }
             }
 
@@ -166,7 +179,24 @@ mod unix {
                 time_pos: t.unwrap_or(0.0).max(0.0),
                 duration: d.unwrap_or(0.0).max(0.0),
                 paused: p.unwrap_or(false),
+                eof_reached: e.unwrap_or(false),
             })
+        }
+
+        /// 复用同一窗口加载新文件（替换当前播放项）。
+        pub fn loadfile_replace(&mut self, path: &Path) -> io::Result<()> {
+            let id = self.next_id();
+            let p = path.to_string_lossy();
+            let p_json = serde_json::to_string(p.as_ref())
+                .unwrap_or_else(|_| "\"\"".to_string());
+            writeln!(
+                self.writer,
+                "{{\"command\":[\"loadfile\",{},\"replace\"],\"request_id\":{}}}",
+                p_json,
+                id
+            )?;
+            self.writer.flush()?;
+            self.drain_until_id(id)
         }
 
         pub fn set_pause(&mut self, paused: bool) -> io::Result<()> {
@@ -264,4 +294,5 @@ pub struct MpvPoll {
     pub time_pos: f64,
     pub duration: f64,
     pub paused: bool,
+    pub eof_reached: bool,
 }

@@ -20,7 +20,7 @@ use crate::media_keys;
 use crate::player_ratatui;
 use crate::resume::{build_resume_state, save_state};
 use crate::state::{PlayerState, UiState};
-use crate::track::Track;
+use crate::track::{MediaKind, Track};
 use crate::ui::poll_input;
 use crate::viz::StatsMonitor;
 
@@ -111,10 +111,45 @@ fn run_with_ipc<B: Backend>(
     let _ = ipc.set_volume_keet(vol0);
 
     let track_info = "视频 · mpv（终端与窗口均可控）";
+    let mut cur_filename = filename.to_string();
+    let mut cur_ext = ext.to_string();
     let mut last_ui = Instant::now()
         .checked_sub(Duration::from_millis(60))
         .unwrap_or_else(Instant::now);
     let mut last_vol = vol0;
+    let mut eof_reached = false;
+
+    fn try_load_video_by_index(
+        ipc: &mut MpvIpc,
+        target: usize,
+        ui: &mut UiState,
+        playlist: &[Track],
+        state: &PlayerState,
+    ) -> Option<(String, String)> {
+        if target >= playlist.len() {
+            return None;
+        }
+        if playlist[target].kind != MediaKind::Video {
+            return None;
+        }
+
+        let path = &playlist[target].path;
+        ipc.loadfile_replace(path).ok()?;
+
+        ui.current = target;
+        state.current_track.store(ui.current, Ordering::Relaxed);
+
+        // Immediately reset TUI time line; next snapshot will overwrite with accurate values.
+        state.set_external_time_duration(0.0, 0.0);
+        state.set_paused(false);
+
+        let filename = ui.metadata_cache.display_name(ui.current, path);
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        Some((filename, ext))
+    }
 
     loop {
         if state.should_quit() {
@@ -130,12 +165,13 @@ fn run_with_ipc<B: Backend>(
             if let Ok(snap) = ipc.poll_snapshot() {
                 state.set_external_time_duration(snap.time_pos, snap.duration);
                 state.set_paused(snap.paused);
+                eof_reached = snap.eof_reached;
             }
         }
 
         if tick_ui {
             if let Some(mc) = media_controls.as_mut() {
-                media_keys::update_metadata(mc, filename, state.total_secs());
+                media_keys::update_metadata(mc, &cur_filename, state.total_secs());
                 media_keys::update_playback(mc, state.is_paused(), state.time_secs());
             }
         }
@@ -172,23 +208,50 @@ fn run_with_ipc<B: Backend>(
         }
 
         if let Some(j) = state.take_jump() {
+            let target = j.min(playlist.len().saturating_sub(1));
+            if let Some((f, e)) =
+                try_load_video_by_index(&mut ipc, target, ui, playlist, state)
+            {
+                cur_filename = f;
+                cur_ext = e;
+                eof_reached = false;
+                continue;
+            }
             let _ = ipc.kill_child();
             state.clear_external_playback();
-            ui.current = j.min(playlist.len().saturating_sub(1));
+            ui.current = target;
             state.current_track.store(ui.current, Ordering::Relaxed);
             return false;
         }
         if state.take_skip_next() {
+            let target = (ui.current + 1).min(playlist.len());
+            if let Some((f, e)) =
+                try_load_video_by_index(&mut ipc, target, ui, playlist, state)
+            {
+                cur_filename = f;
+                cur_ext = e;
+                eof_reached = false;
+                continue;
+            }
             let _ = ipc.kill_child();
             state.clear_external_playback();
-            ui.current = (ui.current + 1).min(playlist.len());
+            ui.current = target;
             state.current_track.store(ui.current, Ordering::Relaxed);
             return false;
         }
         if state.take_skip_prev() {
+            let target = ui.current.saturating_sub(1);
+            if let Some((f, e)) =
+                try_load_video_by_index(&mut ipc, target, ui, playlist, state)
+            {
+                cur_filename = f;
+                cur_ext = e;
+                eof_reached = false;
+                continue;
+            }
             let _ = ipc.kill_child();
             state.clear_external_playback();
-            ui.current = ui.current.saturating_sub(1);
+            ui.current = target;
             state.current_track.store(ui.current, Ordering::Relaxed);
             return false;
         }
@@ -209,6 +272,24 @@ fn run_with_ipc<B: Backend>(
             }
         }
 
+        // mpv 在 --keep-open=yes 下不会自然退出；用 eof-reached 触发“下一条”并复用窗口。
+        if eof_reached {
+            let target = (ui.current + 1).min(playlist.len());
+            if let Some((f, e)) =
+                try_load_video_by_index(&mut ipc, target, ui, playlist, state)
+            {
+                cur_filename = f;
+                cur_ext = e;
+                eof_reached = false;
+                continue;
+            }
+            let _ = ipc.kill_child();
+            state.clear_external_playback();
+            ui.current = target;
+            state.current_track.store(ui.current, Ordering::Relaxed);
+            return false;
+        }
+
         if tick_ui {
             if ui.terminal_resized {
                 ui.terminal_resized = false;
@@ -219,9 +300,9 @@ fn run_with_ipc<B: Backend>(
                 state,
                 ui,
                 playlist,
-                filename,
+                &cur_filename,
                 track_info,
-                ext,
+                &cur_ext,
                 &eq_presets[state.eq_index()],
                 &fx_presets[state.effects_index()].name,
                 &cf_presets[state.crossfeed_index()].name,

@@ -186,6 +186,13 @@ fn apply_banner_hotkey(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec
         BannerHotkey::VizMode => state.cycle_viz_mode(),
         BannerHotkey::VizStyle => state.toggle_viz_style(),
         BannerHotkey::Info => state.toggle_stats(),
+        BannerHotkey::Maximize => {
+            if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
+                state.request_video_window_maximize_toggle();
+            } else {
+                ui.set_status("仅视频播放时可用".to_string());
+            }
+        }
         BannerHotkey::List => {
             ui.view_mode = match ui.view_mode {
                 ViewMode::Player | ViewMode::Lyrics => {
@@ -517,6 +524,12 @@ pub fn poll_input(state: &PlayerState, ui: &mut UiState, playlist: &mut Vec<Trac
                 KeyEvent { code: KeyCode::Char('0'), .. } => {
                     if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
                         state.request_video_view_reset();
+                    }
+                }
+                KeyEvent { code: KeyCode::Char('m'), .. } |
+                KeyEvent { code: KeyCode::Char('M'), .. } => {
+                    if state.external_playback_active.load(Ordering::Relaxed) && ui.view_mode == ViewMode::Player {
+                        state.request_video_window_maximize_toggle();
                     }
                 }
                 _ => {}

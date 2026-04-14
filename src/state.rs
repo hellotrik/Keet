@@ -210,6 +210,7 @@ pub struct PlayerState {
     pub(crate) video_pan_y_steps: AtomicI32,
     pub(crate) video_step_adjust: AtomicI32,
     pub(crate) video_view_reset: AtomicBool,
+    pub(crate) video_window_maximize_toggle: AtomicI32,
 }
 
 impl PlayerState {
@@ -274,6 +275,7 @@ impl PlayerState {
             video_pan_y_steps: AtomicI32::new(0),
             video_step_adjust: AtomicI32::new(0),
             video_view_reset: AtomicBool::new(false),
+            video_window_maximize_toggle: AtomicI32::new(0),
         }
     }
 
@@ -391,6 +393,16 @@ impl PlayerState {
 
     pub fn take_video_view_reset(&self) -> bool {
         self.video_view_reset.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn request_video_window_maximize_toggle(&self) {
+        let _ = self
+            .video_window_maximize_toggle
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn take_video_window_maximize_toggle(&self) -> bool {
+        self.video_window_maximize_toggle.swap(0, Ordering::Relaxed) != 0
     }
 
     pub fn viz_mode(&self) -> VizMode {
@@ -574,6 +586,8 @@ pub enum BannerHotkey {
     Info,
     List,
     Lyrics,
+    /// 视频窗口：最大化（非全屏），仅外部 mpv 播放时有效。
+    Maximize,
     Open,
     Pick,
     Shuffle,

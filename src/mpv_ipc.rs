@@ -36,6 +36,14 @@ mod unix {
         }
     }
 
+    fn parse_data_bool(v: &Value) -> Option<bool> {
+        match v {
+            Value::Null => None,
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
     fn rid_match(v: &Value, want: u64) -> bool {
         v.get("request_id")
             .and_then(|x| x.as_u64())
@@ -234,6 +242,81 @@ mod unix {
                 "{{\"command\":[\"set_property\",{},{}],\"request_id\":{}}}",
                 name_json,
                 value,
+                id
+            )?;
+            self.writer.flush()?;
+            self.drain_until_id(id)
+        }
+
+        pub fn set_property_bool(&mut self, name: &str, value: bool) -> io::Result<()> {
+            let id = self.next_id();
+            let name_json = serde_json::to_string(name)
+                .unwrap_or_else(|_| "\"\"".to_string());
+            writeln!(
+                self.writer,
+                "{{\"command\":[\"set_property\",{},{}],\"request_id\":{}}}",
+                name_json,
+                if value { "true" } else { "false" },
+                id
+            )?;
+            self.writer.flush()?;
+            self.drain_until_id(id)
+        }
+
+        pub fn get_property_bool(&mut self, name: &str) -> io::Result<Option<bool>> {
+            let id = self.next_id();
+            let name_json = serde_json::to_string(name)
+                .unwrap_or_else(|_| "\"\"".to_string());
+            writeln!(
+                self.writer,
+                "{{\"command\":[\"get_property\",{}],\"request_id\":{}}}",
+                name_json,
+                id
+            )?;
+            self.writer.flush()?;
+
+            let mut line = String::new();
+            let mut guard = 0usize;
+            loop {
+                guard += 1;
+                if guard > 2048 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "mpv IPC: get_property drain overflow",
+                    ));
+                }
+                line.clear();
+                let n = self.reader.read_line(&mut line)?;
+                if n == 0 {
+                    return Ok(None);
+                }
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                let v: Value = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if !rid_match(&v, id) {
+                    continue;
+                }
+                if v.get("error").and_then(|e| e.as_str()) != Some("success") {
+                    return Ok(None);
+                }
+                return Ok(v.get("data").and_then(parse_data_bool));
+            }
+        }
+
+        pub fn set_property_string(&mut self, name: &str, value: &str) -> io::Result<()> {
+            let id = self.next_id();
+            let name_json = serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
+            let value_json = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
+            writeln!(
+                self.writer,
+                "{{\"command\":[\"set_property\",{},{}],\"request_id\":{}}}",
+                name_json,
+                value_json,
                 id
             )?;
             self.writer.flush()?;

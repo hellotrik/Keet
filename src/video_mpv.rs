@@ -152,6 +152,7 @@ fn run_with_ipc<B: Backend>(
     let mut pan_y: f64 = 0.0;
     let mut zoom_step: f64 = 0.1;
     let mut pan_step: f64 = 0.05;
+    let mut window_maximized = false;
 
     const ZOOM_MIN_STEP: f64 = 0.05;
     const ZOOM_MAX_STEP: f64 = 0.25;
@@ -171,6 +172,8 @@ fn run_with_ipc<B: Backend>(
         SetVolume(u32),
         SeekRelative(i64),
         SetPropertyF64 { name: &'static str, value: f64 },
+        SetPropertyBool { name: &'static str, value: bool },
+        EnsureMaximized(bool),
         LoadReplace { target: usize, path: std::path::PathBuf },
         Kill,
     }
@@ -224,11 +227,30 @@ fn run_with_ipc<B: Backend>(
     let worker = thread::spawn(move || {
         let mut ipc = ipc;
 
+        fn ensure_window_maximized(ipc: &mut MpvIpc, want: bool) {
+            // window-maximized 在 loadfile replace 后可能短时间不可写；做有限次重试并用 get_property 确认。
+            for _ in 0..10 {
+                let _ = ipc.set_property_bool("window-maximized", want);
+                match ipc.get_property_bool("window-maximized") {
+                    Ok(Some(cur)) if cur == want => break,
+                    _ => std::thread::sleep(Duration::from_millis(30)),
+                }
+            }
+        }
+
+        fn ensure_window_geometry_max(ipc: &mut MpvIpc) {
+            // 兜底策略：不依赖 window-maximized 标志位，直接设置 geometry 让窗口铺满屏幕（非全屏）。
+            // geometry 的支持取决于 mpv 平台后端；会在日志里验证 set/get 是否生效。
+            let _ = ipc.set_property_string("geometry", "100%x100%+0+0");
+        }
+
         // Best-effort initial sync (do not block UI thread).
         let _ = ipc.set_volume_keet(vol0);
         restore_tui_focus_best_effort_macos();
 
         let mut next_snap = Instant::now();
+        let mut want_window_maximized = false;
+        let mut next_max_check = Instant::now() + Duration::from_millis(1000);
         loop {
             // Drain commands with a small timeout so we can keep snapshot cadence.
             match cmd_rx.recv_timeout(Duration::from_millis(5)) {
@@ -247,11 +269,24 @@ fn run_with_ipc<B: Backend>(
                     MpvCmd::SetPropertyF64 { name, value } => {
                         let _ = ipc.set_property_f64(name, value);
                     }
+                    MpvCmd::SetPropertyBool { name, value } => {
+                        if name == "window-maximized" {
+                            want_window_maximized = value;
+                        }
+                        let _ = ipc.set_property_bool(name, value);
+                    }
                     MpvCmd::LoadReplace { target, path } => {
                         let ok = ipc.loadfile_replace(&path).is_ok();
                         let _ = evt_tx.send(MpvEvent::LoadResult { target, ok });
                         if ok {
                             restore_tui_focus_best_effort_macos();
+                        }
+                    }
+                    MpvCmd::EnsureMaximized(want) => {
+                        want_window_maximized = want;
+                        ensure_window_maximized(&mut ipc, want);
+                        if want {
+                            ensure_window_geometry_max(&mut ipc);
                         }
                     }
                     MpvCmd::Kill => {
@@ -266,6 +301,23 @@ fn run_with_ipc<B: Backend>(
                     let _ = evt_tx.send(MpvEvent::Exited);
                     break;
                 }
+            }
+
+            // B: 仅在视频会话期间维持 max。低频自愈，避免持续激活窗口。
+            if want_window_maximized && Instant::now() >= next_max_check {
+                let cur = ipc.get_property_bool("window-maximized");
+                match cur {
+                    Ok(Some(true)) => {}
+                    Ok(Some(false)) | Ok(None) | Err(_) => {
+                        // Only apply when actually not maximized (or unknown).
+                        ensure_window_maximized(&mut ipc, true);
+                        ensure_window_geometry_max(&mut ipc);
+                    }
+                }
+                next_max_check = Instant::now() + Duration::from_millis(1000);
+            } else if !want_window_maximized {
+                // When user turns it off, push out next check so we don't spam gets.
+                next_max_check = Instant::now() + Duration::from_millis(1000);
             }
 
             if Instant::now() >= next_snap {
@@ -318,6 +370,13 @@ fn run_with_ipc<B: Backend>(
                     if pending_load_target == Some(target) {
                         pending_load_target = None;
                     }
+                    // mpv 在 loadfile replace 后可能会重置窗口状态；在确认加载成功后补发视图与最大化状态，确保“维持 max”稳定。
+                    push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
+                    let _ = cmd_tx.send(MpvCmd::SetPropertyBool {
+                        name: "window-maximized",
+                        value: window_maximized,
+                    });
+                    let _ = cmd_tx.send(MpvCmd::EnsureMaximized(window_maximized));
                 }
                 MpvEvent::Fatal(msg) => {
                     if let Ok(mut err) = state.decode_error.lock() {
@@ -411,6 +470,20 @@ fn run_with_ipc<B: Backend>(
             ui.set_status(format!("Pan • x={:.2} y={:.2} (step {:.2})", pan_x, pan_y, pan_step));
         }
 
+        if state.take_video_window_maximize_toggle() {
+            window_maximized = !window_maximized;
+            let _ = cmd_tx.send(MpvCmd::SetPropertyBool {
+                name: "window-maximized",
+                value: window_maximized,
+            });
+            let _ = cmd_tx.send(MpvCmd::EnsureMaximized(window_maximized));
+            ui.set_status(if window_maximized {
+                "窗口：最大化（非全屏）".to_string()
+            } else {
+                "窗口：恢复".to_string()
+            });
+        }
+
         if let Some(j) = state.take_jump() {
             let target = j.min(playlist.len().saturating_sub(1));
             if let Some((f, e)) =
@@ -422,6 +495,10 @@ fn run_with_ipc<B: Backend>(
                 pending_load_target = Some(target);
                 // Keep view state across videos; re-apply after load to avoid mpv resetting filters.
                 push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
+                let _ = cmd_tx.send(MpvCmd::SetPropertyBool {
+                    name: "window-maximized",
+                    value: window_maximized,
+                });
                 continue;
             }
             let _ = cmd_tx.send(MpvCmd::Kill);
@@ -441,6 +518,10 @@ fn run_with_ipc<B: Backend>(
                 eof_reached = false;
                 pending_load_target = Some(target);
                 push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
+                let _ = cmd_tx.send(MpvCmd::SetPropertyBool {
+                    name: "window-maximized",
+                    value: window_maximized,
+                });
                 continue;
             }
             let _ = cmd_tx.send(MpvCmd::Kill);
@@ -460,6 +541,10 @@ fn run_with_ipc<B: Backend>(
                 eof_reached = false;
                 pending_load_target = Some(target);
                 push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
+                let _ = cmd_tx.send(MpvCmd::SetPropertyBool {
+                    name: "window-maximized",
+                    value: window_maximized,
+                });
                 continue;
             }
             let _ = cmd_tx.send(MpvCmd::Kill);
@@ -481,6 +566,10 @@ fn run_with_ipc<B: Backend>(
                 eof_reached = false;
                 pending_load_target = Some(target);
                 push_view_to_mpv(&cmd_tx, zoom, pan_x, pan_y);
+                let _ = cmd_tx.send(MpvCmd::SetPropertyBool {
+                    name: "window-maximized",
+                    value: window_maximized,
+                });
                 continue;
             }
             let _ = cmd_tx.send(MpvCmd::Kill);

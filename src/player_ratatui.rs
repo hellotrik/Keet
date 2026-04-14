@@ -200,6 +200,8 @@ fn render_banner_shortcut_rows(frame: &mut Frame, area: Rect, ui: &mut UiState) 
     banner_row_push_label(&mut spans, &mut cx, " List  ", dim);
     banner_row_push_chip(&mut spans, regs, &mut cx, y, "Y", BannerHotkey::Lyrics);
     banner_row_push_label(&mut spans, &mut cx, " Lyrics  ", dim);
+    banner_row_push_chip(&mut spans, regs, &mut cx, y, "M", BannerHotkey::Maximize);
+    banner_row_push_label(&mut spans, &mut cx, " Max  ", dim);
     banner_row_push_chip(&mut spans, regs, &mut cx, y, "O", BannerHotkey::Open);
     banner_row_push_label(&mut spans, &mut cx, " Open  ", dim);
     banner_row_push_chip(&mut spans, regs, &mut cx, y, "P", BannerHotkey::Pick);

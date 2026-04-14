@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,34 @@ use crate::viz::StatsMonitor;
 
 #[cfg(unix)]
 use crate::mpv_ipc::MpvIpc;
+
+#[cfg(target_os = "macos")]
+fn restore_tui_focus_best_effort_macos() {
+    // mpv 在切片（loadfile replace）时可能会把窗口激活到前台。
+    // 这里不依赖 mpv 的 nofocus 参数，而是在切换成功后把焦点尽量拉回到宿主终端应用。
+    //
+    // Cursor/VS Code 集成终端一般属于 “Cursor” App；独立终端常见是 iTerm/Terminal。
+    let script = r#"
+        tell application "System Events"
+          set appNames to {"Cursor", "iTerm", "Terminal"}
+          repeat with n in appNames
+            try
+              tell application (contents of n) to activate
+              exit repeat
+            end try
+          end repeat
+        end tell
+    "#;
+    let _ = Command::new("osascript")
+        .args(["-e", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn restore_tui_focus_best_effort_macos() {}
 
 /// `true`：用户请求退出整个应用；`false`：继续外层 `playlist` 循环。
 pub fn run_mpv_video_session<B: Backend>(
@@ -91,7 +120,7 @@ pub fn run_mpv_video_session<B: Backend>(
 
 #[cfg(unix)]
 fn run_with_ipc<B: Backend>(
-    mut ipc: MpvIpc,
+    ipc: MpvIpc,
     filename: &str,
     ext: &str,
     state: &Arc<PlayerState>,
@@ -108,7 +137,6 @@ fn run_with_ipc<B: Backend>(
     state.set_external_playback_active(true);
     state.track_info_ready.store(true, Ordering::Relaxed);
     let vol0 = state.volume.load(Ordering::Relaxed);
-    let _ = ipc.set_volume_keet(vol0);
 
     let track_info = "视频 · mpv（终端与窗口均可控）";
     let mut cur_filename = filename.to_string();
@@ -117,10 +145,26 @@ fn run_with_ipc<B: Backend>(
         .checked_sub(Duration::from_millis(60))
         .unwrap_or_else(Instant::now);
     let mut last_vol = vol0;
+    let mut last_paused = state.is_paused();
     let mut eof_reached = false;
 
-    fn try_load_video_by_index(
-        ipc: &mut MpvIpc,
+    enum MpvCmd {
+        SetPause(bool),
+        SetVolume(u32),
+        SeekRelative(i64),
+        LoadReplace { target: usize, path: std::path::PathBuf },
+        Kill,
+    }
+
+    enum MpvEvent {
+        Snapshot(crate::mpv_ipc::MpvPoll),
+        LoadResult { target: usize, ok: bool },
+        Fatal(String),
+        Exited,
+    }
+
+    fn try_queue_video_load_by_index(
+        tx: &mpsc::Sender<MpvCmd>,
         target: usize,
         ui: &mut UiState,
         playlist: &[Track],
@@ -134,7 +178,10 @@ fn run_with_ipc<B: Backend>(
         }
 
         let path = &playlist[target].path;
-        ipc.loadfile_replace(path).ok()?;
+        let _ = tx.send(MpvCmd::LoadReplace {
+            target,
+            path: path.clone(),
+        });
 
         ui.current = target;
         state.current_track.store(ui.current, Ordering::Relaxed);
@@ -151,21 +198,116 @@ fn run_with_ipc<B: Backend>(
         Some((filename, ext))
     }
 
+    // --- IPC worker thread (owning mpv IPC) ---
+    let (cmd_tx, cmd_rx) = mpsc::channel::<MpvCmd>();
+    let (evt_tx, evt_rx) = mpsc::channel::<MpvEvent>();
+
+    let worker = thread::spawn(move || {
+        let mut ipc = ipc;
+
+        // Best-effort initial sync (do not block UI thread).
+        let _ = ipc.set_volume_keet(vol0);
+        restore_tui_focus_best_effort_macos();
+
+        let mut next_snap = Instant::now();
+        loop {
+            // Drain commands with a small timeout so we can keep snapshot cadence.
+            match cmd_rx.recv_timeout(Duration::from_millis(5)) {
+                Ok(cmd) => match cmd {
+                    MpvCmd::SetPause(p) => {
+                        let _ = ipc.set_pause(p);
+                    }
+                    MpvCmd::SetVolume(v) => {
+                        let _ = ipc.set_volume_keet(v);
+                    }
+                    MpvCmd::SeekRelative(delta) => {
+                        if delta != 0 {
+                            let _ = ipc.seek_relative(delta);
+                        }
+                    }
+                    MpvCmd::LoadReplace { target, path } => {
+                        let ok = ipc.loadfile_replace(&path).is_ok();
+                        let _ = evt_tx.send(MpvEvent::LoadResult { target, ok });
+                        if ok {
+                            restore_tui_focus_best_effort_macos();
+                        }
+                    }
+                    MpvCmd::Kill => {
+                        let _ = ipc.kill_child();
+                        let _ = evt_tx.send(MpvEvent::Exited);
+                        break;
+                    }
+                },
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = ipc.kill_child();
+                    let _ = evt_tx.send(MpvEvent::Exited);
+                    break;
+                }
+            }
+
+            if Instant::now() >= next_snap {
+                match ipc.poll_snapshot() {
+                    Ok(snap) => {
+                        let _ = evt_tx.send(MpvEvent::Snapshot(snap));
+                    }
+                    Err(e) => {
+                        let _ = evt_tx.send(MpvEvent::Fatal(format!("mpv IPC poll failed: {e}")));
+                        let _ = ipc.kill_child();
+                        let _ = evt_tx.send(MpvEvent::Exited);
+                        break;
+                    }
+                }
+                next_snap = Instant::now() + Duration::from_millis(50);
+            }
+        }
+    });
+
+    let mut pending_load_target: Option<usize> = None;
+
     loop {
         if state.should_quit() {
-            let _ = ipc.kill_child();
+            let _ = cmd_tx.send(MpvCmd::Kill);
+            let _ = worker.join();
             state.clear_external_playback();
             return true;
         }
 
         let tick_ui = last_ui.elapsed() >= Duration::from_millis(50);
 
-        // mpv → 状态：进度、暂停（与绘制同频，减轻 IPC 压力）
-        if tick_ui {
-            if let Ok(snap) = ipc.poll_snapshot() {
-                state.set_external_time_duration(snap.time_pos, snap.duration);
-                state.set_paused(snap.paused);
-                eof_reached = snap.eof_reached;
+        // mpv → 状态：从后台线程拉取最新快照（非阻塞，避免 UI 卡顿）
+        while let Ok(ev) = evt_rx.try_recv() {
+            match ev {
+                MpvEvent::Snapshot(snap) => {
+                    state.set_external_time_duration(snap.time_pos, snap.duration);
+                    state.set_paused(snap.paused);
+                    eof_reached = snap.eof_reached;
+                }
+                MpvEvent::LoadResult { target, ok } => {
+                    // If load failed, fall back to restarting session in outer loop.
+                    if !ok {
+                        // Align current index so outer loop continues at the intended target.
+                        ui.current = target;
+                        state.current_track.store(ui.current, Ordering::Relaxed);
+                        state.clear_external_playback();
+                        return false;
+                    }
+                    // Load succeeded: clear pending state.
+                    if pending_load_target == Some(target) {
+                        pending_load_target = None;
+                    }
+                }
+                MpvEvent::Fatal(msg) => {
+                    if let Ok(mut err) = state.decode_error.lock() {
+                        *err = Some(msg);
+                    }
+                    state.clear_external_playback();
+                    return false;
+                }
+                MpvEvent::Exited => {
+                    state.clear_external_playback();
+                    return false;
+                }
             }
         }
 
@@ -177,7 +319,8 @@ fn run_with_ipc<B: Backend>(
         }
 
         if poll_input(state, ui, playlist) {
-            let _ = ipc.kill_child();
+            let _ = cmd_tx.send(MpvCmd::Kill);
+            let _ = worker.join();
             state.clear_external_playback();
             return true;
         }
@@ -196,28 +339,34 @@ fn run_with_ipc<B: Backend>(
         }
 
         // 终端侧 → mpv：暂停、音量、相对跳转
-        let _ = ipc.set_pause(state.is_paused());
+        let paused = state.is_paused();
+        if paused != last_paused {
+            let _ = cmd_tx.send(MpvCmd::SetPause(paused));
+            last_paused = paused;
+        }
         let v = state.volume.load(Ordering::Relaxed);
         if v != last_vol {
-            let _ = ipc.set_volume_keet(v);
+            let _ = cmd_tx.send(MpvCmd::SetVolume(v));
             last_vol = v;
         }
         let sk = state.take_seek();
         if sk != 0 {
-            let _ = ipc.seek_relative(sk);
+            let _ = cmd_tx.send(MpvCmd::SeekRelative(sk));
         }
 
         if let Some(j) = state.take_jump() {
             let target = j.min(playlist.len().saturating_sub(1));
             if let Some((f, e)) =
-                try_load_video_by_index(&mut ipc, target, ui, playlist, state)
+                try_queue_video_load_by_index(&cmd_tx, target, ui, playlist, state)
             {
                 cur_filename = f;
                 cur_ext = e;
                 eof_reached = false;
+                pending_load_target = Some(target);
                 continue;
             }
-            let _ = ipc.kill_child();
+            let _ = cmd_tx.send(MpvCmd::Kill);
+            let _ = worker.join();
             state.clear_external_playback();
             ui.current = target;
             state.current_track.store(ui.current, Ordering::Relaxed);
@@ -226,14 +375,16 @@ fn run_with_ipc<B: Backend>(
         if state.take_skip_next() {
             let target = (ui.current + 1).min(playlist.len());
             if let Some((f, e)) =
-                try_load_video_by_index(&mut ipc, target, ui, playlist, state)
+                try_queue_video_load_by_index(&cmd_tx, target, ui, playlist, state)
             {
                 cur_filename = f;
                 cur_ext = e;
                 eof_reached = false;
+                pending_load_target = Some(target);
                 continue;
             }
-            let _ = ipc.kill_child();
+            let _ = cmd_tx.send(MpvCmd::Kill);
+            let _ = worker.join();
             state.clear_external_playback();
             ui.current = target;
             state.current_track.store(ui.current, Ordering::Relaxed);
@@ -242,48 +393,36 @@ fn run_with_ipc<B: Backend>(
         if state.take_skip_prev() {
             let target = ui.current.saturating_sub(1);
             if let Some((f, e)) =
-                try_load_video_by_index(&mut ipc, target, ui, playlist, state)
+                try_queue_video_load_by_index(&cmd_tx, target, ui, playlist, state)
             {
                 cur_filename = f;
                 cur_ext = e;
                 eof_reached = false;
+                pending_load_target = Some(target);
                 continue;
             }
-            let _ = ipc.kill_child();
+            let _ = cmd_tx.send(MpvCmd::Kill);
+            let _ = worker.join();
             state.clear_external_playback();
             ui.current = target;
             state.current_track.store(ui.current, Ordering::Relaxed);
             return false;
         }
 
-        match ipc.try_wait_child() {
-            Ok(Some(_)) => {
-                state.clear_external_playback();
-                ui.current = (ui.current + 1).min(playlist.len());
-                state.current_track.store(ui.current, Ordering::Relaxed);
-                break;
-            }
-            Ok(None) => {}
-            Err(_) => {
-                state.clear_external_playback();
-                ui.current = (ui.current + 1).min(playlist.len());
-                state.current_track.store(ui.current, Ordering::Relaxed);
-                break;
-            }
-        }
-
         // mpv 在 --keep-open=yes 下不会自然退出；用 eof-reached 触发“下一条”并复用窗口。
-        if eof_reached {
+        if eof_reached && pending_load_target.is_none() {
             let target = (ui.current + 1).min(playlist.len());
             if let Some((f, e)) =
-                try_load_video_by_index(&mut ipc, target, ui, playlist, state)
+                try_queue_video_load_by_index(&cmd_tx, target, ui, playlist, state)
             {
                 cur_filename = f;
                 cur_ext = e;
                 eof_reached = false;
+                pending_load_target = Some(target);
                 continue;
             }
-            let _ = ipc.kill_child();
+            let _ = cmd_tx.send(MpvCmd::Kill);
+            let _ = worker.join();
             state.clear_external_playback();
             ui.current = target;
             state.current_track.store(ui.current, Ordering::Relaxed);
@@ -314,8 +453,6 @@ fn run_with_ipc<B: Backend>(
         media_keys::poll();
         thread::sleep(Duration::from_millis(10));
     }
-
-    false
 }
 
 fn run_without_ipc<B: Backend>(
@@ -340,6 +477,7 @@ fn run_without_ipc<B: Backend>(
             "--force-window=yes",
             "--keep-open=no",
             "--geometry=+0+0",
+            "--ontop=no",
         ])
         .arg(path)
         .stdin(Stdio::null())

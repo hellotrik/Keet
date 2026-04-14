@@ -56,6 +56,7 @@ mod unix {
                     "--force-window=yes",
                     "--keep-open=yes",
                     "--geometry=+0+0",
+                    "--ontop=no",
                 ])
                 .arg(path)
                 .stdin(Stdio::null())
@@ -265,10 +266,6 @@ mod unix {
             }
         }
 
-        pub fn try_wait_child(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
-            self.child.try_wait()
-        }
-
         pub fn kill_child(&mut self) -> io::Result<()> {
             let _ = self.child.kill();
             let _ = self.child.wait();
@@ -287,6 +284,9 @@ mod unix {
 
 #[cfg(unix)]
 pub use unix::MpvIpc;
+
+#[cfg(unix)]
+pub use unix::MpvPoll;
 
 #[cfg(not(unix))]
 #[derive(Clone, Debug)]
